@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""write-guard — 「この情報はどこに書くか」の判定機（仕様 v1.0 / fma #96, #9）.
+
+CLI:      write-guard "<書きたい内容の1行説明>" [--type <hint>] [--json]
+Library:  route(description, attrs) -> Route
+
+Route schema (stable): {"layer": str, "path_hint": str, "format_hint": str,
+"caveats": [str, ...]}
+
+判定と提案まで。書き込み実行は常に呼び出し側（auto_capture=false 維持、
+仕様 §0）。判定履歴は JSONL に残すが、secret 拒否時は rule 名のみで内容を
+一切残さない（仕様 §5）。
+
+決定木と層分離ルール v0.2（vault 50_references/2026-05-09-knowledge-memory-
+layer-separation-rules.md）の対応表 — 乖離したらどちらかを直す（二重定義禁止）:
+
+  Q1 secret     = v0.2 原則C / §5 Q1（秘密は記憶レイヤーに入れない）
+  Q2 temporary  = v0.2 §3.1「一時的な気分・直近の雑談」/ §5 Q5 No 側
+  Q3 decision   = v0.2 §6.1（30_decisions/・1決定=1ファイル）
+  Q3 profile    = v0.2 §3.1/§3.2（USER.md / MEMORY.md / profile 正本）
+  Q3 procedure  = v0.2 §6.4（Skill）+ 知見は personal-wiki
+  Q3 structured = v0.2 §6.3（KG。write は Agent C 専権 → 依頼経路の提示）
+  Q3 project    = v0.2 §2 表「Notion / Slack / GitHub / 外部SaaS」（原本は
+                  業務システム側・家族内はプロジェクト repo）
+  Q3 reference  = v0.2 §3.4/§6.1（50_references/ または 25_review-pending/。
+                  review-pending は review-by 必須 — guard は欠落を拒否する
+                  のみで日付の自動補完はしない）
+  Q3 episodic   = v0.2 §4.1（Supermemory は短い要約+正本リンクのみ。
+                  >10行で警告 = 機械強制、仕様 §3）
+  Q4 shared     = v0.2 原則A（正本は1つ。共有面に正本・個人面にポインタ。
+                  共有指定なら個人層の Route を共有面へ差し替え、逆も同様）
+
+既知の限界（レビュー確定・仕様 §3 の区分どおり）:
+- Q1 の機械強制は scripts/secret-scan の検出力に等しい（仕様 §3 が明示する
+  スコープ）。エントロピー閾値未満のパスワードや顧客機微テキストは検出でき
+  ないため、呼び出し側は該当時に --secret（attrs["secret"]=True）で宣言する。
+  監査ログの description は secret-scan の偽陰性率を継承する。
+- op:// の 1Password 位置ポインタは「場所と取り扱いルール」に該当するため
+  拒否対象から除外する（Q1 は値のみを拒否する）。
+- キーワード分類はフォールバック。--type ヒントが常に優先で、単語境界は
+  英語トークンのみ強制（日本語の否定文脈までは解釈しない）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+DEFAULT_LOG_DIR = "~/.claude/state/write-guard"
+SECRET_CAVEAT_PREFIX = "secret-scan: "
+ALLOWED_LOCATION_RULES = frozenset({"op-uri"})
+AGENT_RE = re.compile(r"^[a-z0-9_-]+$")
+REVIEW_BY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TYPES = (
+    "decision",
+    "profile",
+    "procedure",
+    "structured",
+    "project",
+    "reference",
+    "episodic",
+)
+
+_TEMPORARY_RE = re.compile(
+    r"今セッション|今日の作業|今日だけ|一時的|使い捨て|scratch|temporary|"
+    r"this session|today only",
+    re.IGNORECASE,
+)
+_TYPE_KEYWORDS = (
+    ("decision", re.compile(r"決定|方針|決めた|採用する|に統一|\bdecided\b|\bdecision\b", re.IGNORECASE)),
+    ("procedure", re.compile(r"手順|\brunbook\b|チェックリスト|コマンド列|やり方|\bhow to\b|\bsteps\b|再利用可能な手順", re.IGNORECASE)),
+    ("structured", re.compile(r"エンティティ|リレーション|関係を登録|\bkg\b|\bknowledge graph\b|\bentity\b|\brelation\b", re.IGNORECASE)),
+    ("profile", re.compile(r"嗜好|呼び方|口調|プロフィール|\bpreference\b|\bprofile\b|好み", re.IGNORECASE)),
+    ("episodic", re.compile(r"会話の要約|セッションの出来事|エピソード|\bepisodic\b|今日あったこと", re.IGNORECASE)),
+    ("reference", re.compile(r"記事|論文|実測|比較表|資料|\breference\b|ベンチマーク|外部ドキュメント", re.IGNORECASE)),
+    ("project", re.compile(r"\bissue\b|\bpull request\b|\bpr\b|\bhandoff\b|プロジェクト|リポジトリ|\brepo\b", re.IGNORECASE)),
+)
+
+
+def _load_secret_scan():
+    path = Path(__file__).with_name("secret-scan")
+    loader = importlib.machinery.SourceFileLoader("write_guard_secret_scan", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    for symbol in ("line_hits", "OP_URI_RE"):
+        if not hasattr(module, symbol):
+            raise RuntimeError(
+                f"scripts/secret-scan is missing required symbol {symbol!r}"
+                " — write-guard depends on it for Q1 secret detection"
+            )
+    return module
+
+
+def secret_rules(text: str) -> list[str]:
+    """Return rule names that fire on the text; never return the content.
+
+    Uses secret-scan's structured line_hits (rule_id, values) directly instead
+    of parsing display strings, so the values never pass through here.
+
+    op:// location pointers are the 「場所と取り扱いルール」 that Q1 permits,
+    so they are stripped BEFORE scanning rather than exempted after: an
+    op-uri hit makes secret-scan return early for that line, which would
+    otherwise mask a real secret sitting on the same line.
+    """
+    module = _load_secret_scan()
+    cleaned = module.OP_URI_RE.sub("<op-location>", text)
+    lines = cleaned.splitlines() or [cleaned]
+    rules = []
+    for index, line in enumerate(lines):
+        for rule_id, _values in module.line_hits(line, lines, index):
+            if rule_id not in ALLOWED_LOCATION_RULES:
+                rules.append(rule_id)
+    return rules
+
+
+def _route(layer: str, path_hint: str, format_hint: str, caveats: list[str]) -> dict:
+    return {
+        "layer": layer,
+        "path_hint": path_hint,
+        "format_hint": format_hint,
+        "caveats": caveats,
+    }
+
+
+def _classify(description: str, type_hint: str | None) -> str | None:
+    if type_hint:
+        return type_hint
+    for name, pattern in _TYPE_KEYWORDS:
+        if pattern.search(description):
+            return name
+    return None
+
+
+def route(description: str, attrs: dict | None = None) -> dict:
+    """仕様 §2 の決定木 Q1-Q4。attrs: type/temporary/shared/review_by/agent/
+    body/secret（呼び出し側の secret 宣言 — scanner が拾えない password や
+    顧客機微はこれで拒否に乗せる）."""
+    attrs = attrs or {}
+
+    agent = attrs.get("agent")
+    if agent is not None and not AGENT_RE.match(str(agent)):
+        raise ValueError(f"invalid agent name (want [a-z0-9_-]+): {agent!r}")
+
+    # Q1 — secret（v0.2 原則C）: scanner 検出 or 呼び出し側宣言で拒否。
+    rules = secret_rules(description)
+    if attrs.get("secret"):
+        rules.append("declared-by-caller")
+    if rules:
+        return _route(
+            "refused",
+            ".env / credential store / 1Password",
+            "記憶レイヤーには「場所と取り扱いルール」のみ許可（値は書かない）",
+            [f"{SECRET_CAVEAT_PREFIX}{rule}" for rule in rules],
+        )
+
+    # Q2 — 一時的（v0.2 §5 Q5 No 側）: 保存不要を明示する定常 schema。
+    if attrs.get("temporary") or _TEMPORARY_RE.search(description):
+        return _route(
+            "none",
+            "scratch / session ログ / daily note",
+            "保存不要（呼び出し側はこの Route を受けて何も書かないのが正）",
+            ["繰り返し出てきたら恒久情報として昇格を検討（v0.2 §3.1）"],
+        )
+
+    # Q3 — 恒久情報の種類。
+    kind = _classify(description, attrs.get("type"))
+    if kind is not None and kind not in TYPES:
+        raise ValueError(f"unknown type hint: {kind}")
+    shared = attrs.get("shared")  # True=家族全員 / False=自分だけ / None=不明
+
+    if kind is None:
+        return _route(
+            "unknown",
+            "--type で種類を指定（" + " / ".join(TYPES) + "）",
+            "キーワードから分類できなかった",
+            ["分類できないまま書くなら 25_review-pending/（review-by 必須）"],
+        )
+
+    if kind == "decision":
+        result = _route(
+            "family-vault",
+            "30_decisions/YYYY-MM-DD-<slug>.md",
+            "1決定=1ファイル+frontmatter",
+            ["hot-inbox 投函は create-once", "本文は要約+正本リンク"],
+        )
+    elif kind == "profile":
+        result = _route(
+            "memory-md",
+            "MEMORY.md 配下 profile 正本",
+            "C1 デデュープ対応表に従う（既存 profile の更新を優先・重複新設しない）",
+            [],
+        )
+    elif kind == "procedure":
+        result = _route(
+            "skill",
+            "Skill（検証済み手順）/ personal-wiki（知見・パターン）",
+            "コマンド・検証方法・失敗時の戻し方まで含める（v0.2 §6.4）",
+            ["単なる事実メモは Skill にしない"],
+        )
+    elif kind == "structured":
+        result = _route(
+            "kg",
+            "KG entity/relation",
+            "名前・ID・関係・所有者・状態（長文説明は vault に置いてリンク）",
+            ["KG write は Agent C 専権 — 依頼経路（hot-inbox / fma #12-#13）で申請"],
+        )
+    elif kind == "project":
+        result = _route(
+            "project-repo",
+            "該当プロジェクト repo（Issue / README / handoff）",
+            "リポジトリの慣行に従う",
+            [],
+        )
+    elif kind == "reference":
+        review_pending = bool(attrs.get("review_pending"))
+        review_by = str(attrs.get("review_by") or "").strip()
+        if review_pending and not REVIEW_BY_RE.match(review_by):
+            return _route(
+                "refused",
+                "vault 25_review-pending/",
+                "review-by 必須（YYYY-MM-DD・呼び出し側が明示指定。guard は補完しない）",
+                ["review-by 欠落または不正形式のため拒否（仕様 §2 Q3 reference）"],
+            )
+        result = _route(
+            "family-vault",
+            "50_references/" if not review_pending else "25_review-pending/",
+            "status / created / last_updated / related / tags を付ける（v0.2 §6.1）",
+            [],
+        )
+    else:  # episodic
+        agent = str(attrs.get("agent") or "self")
+        caveats = ["短い要約+正本リンクのみ（正本の代替にしない）"]
+        body = attrs.get("body")
+        if body is not None and len(str(body).splitlines()) > 10:
+            caveats.append("警告: 本文が10行超 — Supermemory には要約だけを入れる（仕様 §3）")
+        result = _route(
+            "supermemory",
+            f"personal_{agent}",
+            "source_type / source_uri / canonical_layer / owner / status / updated_at を付ける（v0.2 §4.4）",
+            caveats,
+        )
+
+    # Q4 — 共有範囲（v0.2 原則A）: 正本の面を実際に差し替える（caveat だけに
+    # しない — 仕様 §2 Q4 は行き先の分岐）。
+    if shared is True and result["layer"] in ("memory-md", "supermemory", "skill"):
+        original = result["path_hint"]
+        result["layer"] = "family-vault"
+        result["path_hint"] = "共有面: vault 該当ディレクトリ（10_people/ 20_projects/ 50_references/ 等）または KG"
+        result["caveats"].append(
+            f"個人面（{original}）には正本を置かずポインタだけ残す"
+        )
+    elif shared is False and kind == "decision":
+        # Only a decision has a genuine personal analogue (a private note).
+        # reference→50_references/ and structured→KG are plane-by-content,
+        # not by sharing scope (v0.2 §3.4/§6.3), so those keep their hint and
+        # only get an advisory caveat rather than losing the destination.
+        original = result["path_hint"]
+        result["layer"] = "memory-md"
+        result["path_hint"] = "個人面: MEMORY.md / personal-wiki（自分専用の記録）"
+        result["caveats"].append(
+            f"家族が参照すべきものになったら共有面（{original}）へ昇格"
+        )
+    elif shared is False and result["layer"] in ("family-vault", "kg"):
+        result["caveats"].append(
+            "自分だけ向けでも、この種別の正本は共有面のまま（個人面には要約+リンク）"
+        )
+    return result
+
+
+def _log(entry: dict) -> bool:
+    """Append one audit entry. Returns False if the write failed."""
+    log_dir = Path(os.environ.get("WRITE_GUARD_LOG_DIR", DEFAULT_LOG_DIR)).expanduser()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with (log_dir / "decisions.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except OSError as exc:
+        print(f"write-guard: audit log write failed: {exc}", file=sys.stderr)
+        return False
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="write-guard",
+        description="判定と提案のみ。書き込みは呼び出し側（仕様 v1.0）。",
+    )
+    parser.add_argument("description", help="書きたい内容の1行説明")
+    parser.add_argument("--type", choices=TYPES, default=None)
+    parser.add_argument("--temporary", action="store_true")
+    parser.add_argument("--secret", action="store_true",
+                        help="scanner が拾えない secret/顧客機微を呼び出し側で宣言")
+    parser.add_argument("--shared", choices=["family", "personal"], default=None)
+    parser.add_argument("--review-pending", action="store_true")
+    parser.add_argument("--review-by", default=None)
+    parser.add_argument("--agent", default=os.environ.get("WRITE_GUARD_AGENT", "agent-a"))
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not AGENT_RE.match(args.agent):
+        parser.error(f"--agent must match [a-z0-9_-]+")
+
+    attrs = {
+        "type": args.type,
+        "temporary": args.temporary,
+        "secret": args.secret,
+        "shared": {"family": True, "personal": False, None: None}[args.shared],
+        "review_pending": args.review_pending,
+        "review_by": args.review_by,
+        "agent": args.agent,
+    }
+    result = route(args.description, attrs)
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    refused = result["layer"] == "refused"
+    refused_secret = refused and any(
+        c.startswith(SECRET_CAVEAT_PREFIX) for c in result["caveats"]
+    )
+    if refused:
+        # 拒否 route は種別を問わず description をログに残さない（secret は
+        # 仕様 §5 の要請、その他も「拒否理由の取り違え」による漏えいを防ぐ）。
+        reason = "secret" if refused_secret else "policy"
+        logged = _log({"ts": now, "refused": reason, "rules": result["caveats"]})
+    else:
+        logged = _log(
+            {
+                "ts": now,
+                "description": args.description,
+                "type": args.type,
+                "layer": result["layer"],
+                "path_hint": result["path_hint"],
+                "caveats": result["caveats"],
+            }
+        )
+    if not logged:
+        # §5 の監査は必須: 書けなかったら「何も残っていない」ことを
+        # 呼び出し側が検出できるよう明示 signal を出す。
+        print(
+            "write-guard: AUDIT NOT RECORDED — decision was not persisted"
+            " (spec §5 audit mandate unmet)",
+            file=sys.stderr,
+        )
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"layer:       {result['layer']}")
+        print(f"path_hint:   {result['path_hint']}")
+        print(f"format_hint: {result['format_hint']}")
+        for caveat in result["caveats"]:
+            print(f"caveat:      {caveat}")
+    if refused_secret:
+        return 3  # secret 拒否（恒久 — 1Password 等へ）
+    if refused:
+        return 4  # ポリシー拒否（review-by 補完等で再実行可能）
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

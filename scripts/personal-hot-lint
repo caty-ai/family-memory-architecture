@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Lint the hand-curated personal hot cache.
+
+Future work may unify this with vault-lint or a shared lint library after that
+tool exists in this branch; for now this script is intentionally self-contained.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+DEFAULT_HOT_PATH = "~/personal-wiki/wiki/hot.md"
+DEFAULT_WIKI_ROOT = "~/personal-wiki/wiki"
+DEFAULT_HEARTBEAT_DIR = "~/.claude/state/heartbeats"
+WARN_SIZE_BYTES = 7168
+FAIL_SIZE_BYTES = 8192
+STALE_DAYS = 14
+WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+UPDATED_RE = re.compile(r"^updated:\s*(\S+)")
+LAST_UPDATED_RE = re.compile(r"^## Last Updated:\s*(.+)$")
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def read_fail_count(path):
+    try:
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            return int(previous.get("fail_count", 0))
+    except (OSError, ValueError, TypeError):
+        return 0
+    return 0
+
+
+def write_heartbeat(path, job, status, reason, docs, duration_ms):
+    fail_count = read_fail_count(path)
+    fail_count = 0 if status == "ok" else fail_count + 1
+    payload = {
+        "job": job,
+        "last_run": utc_now_iso(),
+        "status": status,
+        "fail_count": fail_count,
+        "duration_ms": int(duration_ms),
+        "docs": int(docs),
+    }
+    if status == "fail":
+        payload["reason"] = (reason or "failed")[:300]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def parse_isoish_date(value):
+    token = value.strip().split()[0]
+    try:
+        normalized = token.replace("Z", "+00:00") if token.endswith("Z") else token
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = datetime.fromisoformat(token[:10])
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def frontmatter_updated(text):
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return None
+    for line in text[4:end].splitlines():
+        match = UPDATED_RE.match(line)
+        if match:
+            return match.group(1), "frontmatter"
+    return None
+
+
+def find_updated(text):
+    found = frontmatter_updated(text)
+    if found:
+        return found
+    for line in text.splitlines():
+        match = LAST_UPDATED_RE.match(line)
+        if match:
+            return match.group(1).strip(), "body"
+    return None
+
+
+def strip_code(text):
+    lines = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(line)
+    text = "\n".join(lines)
+    return re.sub(r"`[^`\n]*`", "", text)
+
+
+def wiki_stems(wiki_root):
+    stems = {}
+    for path in wiki_root.rglob("*.md"):
+        stems.setdefault(path.stem, []).append(path)
+    return stems
+
+
+def dead_wikilinks(text, wiki_root):
+    stems = wiki_stems(wiki_root)
+    dead = set()
+    for match in WIKILINK_RE.finditer(strip_code(text)):
+        target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+        if target.endswith(".md"):
+            target = target[:-3]
+        target = Path(target).name
+        if target and target not in stems:
+            dead.add(target)
+    return sorted(dead)
+
+
+def run_secret_scan(hot_path):
+    script = Path(__file__).resolve().parents[1] / "scripts" / "secret-scan"
+    try:
+        result = subprocess.run(
+            [str(script), str(hot_path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "error", f"secret-scan failed to run: {exc}\n"
+    output = (result.stdout or "") + (result.stderr or "")
+    if result.returncode == 0:
+        return "clean", output
+    if result.returncode == 2:
+        return "findings", output
+    return "error", output or f"secret-scan returned {result.returncode}\n"
+
+
+def add_finding(findings, severity, category, message):
+    findings.append({"severity": severity, "category": category, "message": message})
+
+
+def lint(args):
+    hot_path = expand_path(args.hot_path)
+    wiki_root = expand_path(args.wiki_root)
+    if not hot_path.exists():
+        raise FileNotFoundError(f"hot-path does not exist: {hot_path}")
+    if not wiki_root.exists():
+        raise FileNotFoundError(f"wiki-root does not exist: {wiki_root}")
+
+    findings = []
+    raw = hot_path.read_bytes()
+    size = len(raw)
+    if size > FAIL_SIZE_BYTES:
+        add_finding(findings, "fail", "size", f"size {size} bytes exceeds {FAIL_SIZE_BYTES}")
+    elif size > WARN_SIZE_BYTES:
+        add_finding(findings, "warn", "size", f"size {size} bytes exceeds warning cap {WARN_SIZE_BYTES}")
+
+    text = raw.decode("utf-8")
+    updated = find_updated(text)
+    if not updated:
+        add_finding(findings, "warn", "staleness", "no updated/Last Updated date found")
+    else:
+        value, source = updated
+        try:
+            parsed = parse_isoish_date(value)
+            age_days = (datetime.now(timezone.utc) - parsed).total_seconds() / 86400
+            if age_days > STALE_DAYS:
+                add_finding(findings, "warn", "staleness", f"{source} date {value} is {age_days:.1f} days old")
+        except ValueError:
+            add_finding(findings, "warn", "staleness", f"updated date is not ISO-ish: {value}")
+
+    for target in dead_wikilinks(text, wiki_root):
+        add_finding(findings, "warn", "dead-wikilink", f"dead wikilink target: {target}")
+
+    secret_status, secret_output = run_secret_scan(hot_path)
+    if secret_output:
+        print(secret_output, end="" if secret_output.endswith("\n") else "\n", file=sys.stderr)
+    if secret_status == "findings":
+        add_finding(findings, "fail", "secret", "secret-scan found findings")
+    elif secret_status == "error":
+        add_finding(findings, "fail", "secret-scan-error", secret_output.strip() or "secret-scan failed")
+
+    return findings
+
+
+def print_report(findings):
+    warn_count = sum(1 for finding in findings if finding["severity"] == "warn")
+    fail_count = sum(1 for finding in findings if finding["severity"] == "fail")
+    print(f"personal-hot-lint: warnings={warn_count} failures={fail_count}")
+    categories = sorted({finding["category"] for finding in findings})
+    for category in categories:
+        warns = sum(1 for finding in findings if finding["category"] == category and finding["severity"] == "warn")
+        fails = sum(1 for finding in findings if finding["category"] == category and finding["severity"] == "fail")
+        print(f"{category}: warn={warns} fail={fails}")
+        for finding in findings:
+            if finding["category"] == category:
+                print(f"  {finding['severity']}: {finding['message']}")
+    if not findings:
+        print("clean")
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Lint the hand-curated personal hot cache.")
+    parser.add_argument("--hot-path", default=DEFAULT_HOT_PATH)
+    parser.add_argument("--wiki-root", default=DEFAULT_WIKI_ROOT)
+    parser.add_argument("--heartbeat-dir")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    started = time.monotonic()
+    args = parse_args(argv)
+    exit_code = 1
+    reason = None
+    try:
+        findings = lint(args)
+        print_report(findings)
+        exit_code = 2 if any(finding["severity"] == "fail" for finding in findings) else 0
+        reason = "; ".join(finding["message"] for finding in findings if finding["severity"] == "fail") or None
+    except (OSError, UnicodeDecodeError, FileNotFoundError) as exc:
+        reason = str(exc)
+        print(f"personal-hot-lint: {reason}", file=sys.stderr)
+        exit_code = 1
+    finally:
+        heartbeat_dir = expand_path(args.heartbeat_dir or os.environ.get("FMA_HEARTBEAT_DIR") or DEFAULT_HEARTBEAT_DIR)
+        status = "fail" if exit_code in {1, 2} else "ok"
+        try:
+            write_heartbeat(
+                heartbeat_dir / "personal-hot-lint.json",
+                "personal-hot-lint",
+                status,
+                reason,
+                0,
+                int((time.monotonic() - started) * 1000),
+            )
+        except OSError as exc:
+            print(f"warning: personal-hot-lint heartbeat write failed: {exc}", file=sys.stderr)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

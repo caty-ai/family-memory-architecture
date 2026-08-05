@@ -1,0 +1,14 @@
+{
+  "id": "openclaw-capture",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "required": ["spoolDir"],
+    "properties": {
+      "spoolDir": {
+        "type": "string",
+        "description": "Directory where capture JSONL spool files are written."
+      }
+    }
+  }
+}

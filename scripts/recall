@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""Query the three family-memory recall layers and merge the results."""
+
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib import error, request
+
+
+DEFAULT_LAYERS = ("sm", "meili", "grep")
+DEFAULT_SM_CONTAINER = "personal-agent-a"
+DEFAULT_SCRATCH_DIR = "~/.claude/scratch/agent-a/recall/"
+DEFAULT_STATS_PATH = "~/.claude/recall/stats.jsonl"
+DEFAULT_MEM_SEARCH = "~/.claude/scripts/mem-search"
+DEFAULT_TRANSCRIPTS_DIR = "~/.claude/projects"
+DEFAULT_GREP_ROOTS = (
+    "~/.claude/projects/-Users-you-workspace/memory/",
+    "~/family-vault/",
+    "~/personal-wiki/",
+)
+DEFAULT_MEILI_ROOTS = (
+    "~/family-vault/",
+    "~/personal-wiki/",
+)
+SM_ENV_PATH = "~/.config/supermemory/env"
+LAYER_TIMEOUT_SECONDS = 10
+LAYER_TIMEOUT_SLACK_SECONDS = 0.05
+
+
+class RecallError(Exception):
+    """Raised for usage errors that should stop the CLI."""
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(str(path_text))))
+
+
+def utc_z(dt=None):
+    dt = dt or datetime.now(timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_layers(text):
+    layers = []
+    for item in text.split(","):
+        layer = item.strip().lower()
+        if not layer:
+            continue
+        if layer not in DEFAULT_LAYERS:
+            raise RecallError(f"unknown layer {layer!r}; expected sm, meili, grep")
+        if layer not in layers:
+            layers.append(layer)
+    if not layers:
+        raise RecallError("--layers must include at least one layer")
+    return layers
+
+
+def parse_supermemory_env(path=SM_ENV_PATH):
+    env_path = expand_path(path)
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RecallError(f"cannot read Supermemory env file: {exc}") from exc
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() != "SUPERMEMORY_CC_API_KEY":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if not value:
+            raise RecallError("SUPERMEMORY_CC_API_KEY is empty")
+        return value
+    raise RecallError("SUPERMEMORY_CC_API_KEY not found")
+
+
+def pick_first(data, names):
+    if isinstance(data, dict):
+        for name in names:
+            value = data.get(name)
+            if value is not None:
+                return value
+    return None
+
+
+def first_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("results", "hits", "items", "data", "memories", "documents"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        nested = data.get("result")
+        if isinstance(nested, dict):
+            return first_list(nested)
+    return []
+
+
+def compact_text(value, limit=240):
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def supermemory_search(query, limit, container_tag=DEFAULT_SM_CONTAINER, env_path=SM_ENV_PATH):
+    api_key = parse_supermemory_env(env_path)
+    body = json.dumps({"q": query, "containerTag": container_tag, "limit": limit}).encode("utf-8")
+    req = request.Request(
+        "https://api.supermemory.ai/v4/search",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=LAYER_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+    hits = []
+    for item in first_list(payload):
+        if isinstance(item, dict):
+            item = dict(item)
+            item.setdefault("containerTag", container_tag)
+            hits.append(item)
+    return hits[:limit]
+
+
+def mem_search(query, limit):
+    script = expand_path(os.environ.get("RECALL_MEM_SEARCH", DEFAULT_MEM_SEARCH))
+    command = [str(script), "--json", "-l", str(limit), "--", query]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=LAYER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("mem-search timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"mem-search exited {result.returncode}")
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"mem-search returned non-JSON output: {exc}") from exc
+    hits = [item for item in first_list(payload) if isinstance(item, dict)]
+    return hits[:limit]
+
+
+def rg_search(query, roots, limit):
+    command = ["rg", "--json", "-i", "-m", str(limit), "-e", query, "--", *map(str, roots)]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=LAYER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("rg timed out") from exc
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"rg exited {result.returncode}")
+    hits = []
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "match":
+            continue
+        data = event.get("data") or {}
+        path = (data.get("path") or {}).get("text")
+        line_number = data.get("line_number")
+        text = (data.get("lines") or {}).get("text", "")
+        hits.append({"path": path, "line": line_number, "text": text})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def grep_search(query, roots, limit):
+    command = ["grep", "-Rni", "-m", str(limit), "-e", query, "--", *map(str, roots)]
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=LAYER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("grep timed out") from exc
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"grep exited {result.returncode}")
+    hits = []
+    for line in result.stdout.splitlines():
+        path_text, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        line_text, sep, text = rest.partition(":")
+        if not sep:
+            continue
+        try:
+            line_number = int(line_text)
+        except ValueError:
+            continue
+        hits.append({"path": path_text, "line": line_number, "text": text})
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def grep_layer(query, limit, roots=None):
+    selected_roots = roots or DEFAULT_GREP_ROOTS
+    expanded_roots = [expand_path(root) for root in selected_roots]
+    existing_roots = [root for root in expanded_roots if root.exists()]
+    if not existing_roots:
+        return []
+    if shutil.which("rg"):
+        return rg_search(query, existing_roots, limit)
+    return grep_search(query, existing_roots, limit)
+
+
+def absolute_path(value):
+    if not value:
+        return None
+    path = expand_path(value)
+    if not path.is_absolute():
+        path = path.resolve()
+    return str(path)
+
+
+def sm_pointer(item):
+    memory_id = pick_first(item, ("id", "memoryId", "memory_id", "_id"))
+    container = pick_first(item, ("containerTag", "container_tag", "container"))
+    if not memory_id or not container:
+        return None
+    return f"supermemory:{memory_id} containerTag={container}"
+
+
+def file_pointer(item):
+    path = pick_first(item, ("path", "file", "filepath", "file_path", "source", "source_path"))
+    if isinstance(path, dict):
+        path = pick_first(path, ("text", "path", "value"))
+    abs_path = absolute_path(path)
+    if not abs_path:
+        return None
+    line = pick_first(item, ("line", "line_number", "lineNumber", "lineno"))
+    if line:
+        return f"{abs_path}:{line}"
+    return abs_path
+
+
+def meili_candidate_roots():
+    roots_text = os.environ.get("RECALL_MEILI_ROOTS")
+    roots = roots_text.split(os.pathsep) if roots_text is not None else DEFAULT_MEILI_ROOTS
+    return [expand_path(root) for root in roots if root]
+
+
+def transcripts_dir():
+    return expand_path(os.environ.get("RECALL_TRANSCRIPTS_DIR", DEFAULT_TRANSCRIPTS_DIR))
+
+
+def meili_absolute_path(value):
+    if not value:
+        return None
+    path = expand_path(value)
+    if path.is_absolute():
+        return str(path)
+    for root in meili_candidate_roots():
+        if not root.is_absolute():
+            continue
+        candidate = root / path
+        if candidate.exists():
+            return str(candidate.resolve())
+    return None
+
+
+def meili_transcripts_item(item, path):
+    index = pick_first(item, ("_index", "index"))
+    if index is not None:
+        return "transcript" in str(index).lower()
+    return path is None and pick_first(item, ("session_id", "sessionId", "session")) is not None
+
+
+def meili_transcripts_pointer(item):
+    project = pick_first(item, ("project",))
+    session_id = pick_first(item, ("session_id", "sessionId", "session"))
+    if not project or not session_id:
+        return None
+    session_id = str(session_id)
+    candidate = transcripts_dir() / str(project) / f"{session_id}.jsonl"
+    if not candidate.exists():
+        return None
+    return f"{candidate} (session_id={session_id})"
+
+
+def meili_pointer(item):
+    path = pick_first(item, ("path", "file", "filepath", "file_path", "source", "source_path"))
+    if isinstance(path, dict):
+        path = pick_first(path, ("text", "path", "value"))
+    if path is None and meili_transcripts_item(item, path):
+        return meili_transcripts_pointer(item)
+    abs_path = meili_absolute_path(path)
+    if not abs_path:
+        return None
+    line = pick_first(item, ("line", "line_number", "lineNumber", "lineno"))
+    if line:
+        return f"{abs_path}:{line}"
+    return abs_path
+
+
+def hit_pointer(layer, item):
+    if layer == "sm":
+        return sm_pointer(item)
+    if layer == "meili":
+        return meili_pointer(item)
+    return file_pointer(item)
+
+
+def emit_hits(layer, raw_hits):
+    emitted = []
+    rejected = 0
+    for index, item in enumerate(raw_hits):
+        if not isinstance(item, dict):
+            rejected += 1
+            continue
+        pointer = hit_pointer(layer, item)
+        if not pointer:
+            rejected += 1
+            continue
+        title = compact_text(pick_first(item, ("title", "name", "heading", "path", "file"))) or pointer
+        snippet = compact_text(pick_first(item, ("snippet", "text", "content", "body", "summary", "description")))
+        emitted.append(
+            {
+                "layer": layer,
+                "pointer": pointer,
+                "title": title,
+                "snippet": snippet,
+                "ordinal": index,
+            }
+        )
+    return emitted, rejected
+
+
+def round_robin(layer_hits, layer_order):
+    merged = []
+    index = 0
+    while True:
+        added = False
+        for layer in layer_order:
+            hits = layer_hits.get(layer, [])
+            if index < len(hits):
+                merged.append(hits[index])
+                added = True
+        if not added:
+            return merged
+        index += 1
+
+
+def status_entry(status="skipped", hits=0, latency_ms=0, error_text=None):
+    entry = {"status": status, "hits": hits, "latency_ms": int(latency_ms)}
+    if error_text:
+        entry["error"] = compact_text(error_text, 160)
+    return entry
+
+
+def run_layer(layer, adapter, query, limit):
+    start = time.monotonic()
+    raw_hits = adapter(query, limit)
+    latency_ms = int((time.monotonic() - start) * 1000)
+    hits, rejected = emit_hits(layer, raw_hits)
+    return hits, rejected, latency_ms
+
+
+def build_adapters(sm_container, grep_roots):
+    return {
+        "sm": lambda query, limit: supermemory_search(query, limit, sm_container),
+        "meili": mem_search,
+        "grep": lambda query, limit: grep_layer(query, limit, grep_roots),
+    }
+
+
+def write_scratch(path, query, ts, statuses, merged_hits):
+    path.mkdir(parents=True, exist_ok=True)
+    file_path = path / f"recall-{ts}.md"
+    lines = [f"# Recall {ts}", "", f"Query: `{query}`", ""]
+    for layer in DEFAULT_LAYERS:
+        status = statuses[layer]
+        if status["status"] == "skipped":
+            continue
+        reason = f" {status['error']}" if status.get("error") else ""
+        lines.append(f"- layer={layer} status={status['status']} hits={status['hits']} latency_ms={status['latency_ms']}{reason}")
+    lines.append("")
+    for hit in merged_hits:
+        lines.append(f"## [{hit['layer']}] {hit['title']}")
+        lines.append(f"pointer: {hit['pointer']}")
+        if hit["snippet"]:
+            lines.append("")
+            lines.append(hit["snippet"])
+        lines.append("")
+    file_path.write_text("\n".join(lines), encoding="utf-8")
+    return file_path
+
+
+def append_stats(path, stats):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(stats, sort_keys=True, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"warning: could not write recall stats: {exc}", file=sys.stderr)
+
+
+def recall(
+    query,
+    layers=None,
+    local_only=False,
+    limit=8,
+    scratch_dir=DEFAULT_SCRATCH_DIR,
+    stats_path=DEFAULT_STATS_PATH,
+    sm_container=DEFAULT_SM_CONTAINER,
+    grep_roots=None,
+    adapters=None,
+    timeout=LAYER_TIMEOUT_SECONDS,
+    now=None,
+):
+    layer_order = list(layers or DEFAULT_LAYERS)
+    adapters = adapters or build_adapters(sm_container, grep_roots)
+    queried_layers = [layer for layer in layer_order if not (local_only and layer == "sm")]
+    if not queried_layers:
+        raise RecallError("no layers to query after applying --local-only")
+
+    statuses = {layer: status_entry() for layer in DEFAULT_LAYERS}
+    layer_hits = {layer: [] for layer in DEFAULT_LAYERS}
+    rejected_hits = 0
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(queried_layers))
+    futures = {}
+    starts = {}
+    try:
+        for layer in queried_layers:
+            start = time.monotonic()
+            future = executor.submit(run_layer, layer, adapters[layer], query, limit)
+            futures[future] = layer
+            starts[future] = start
+
+        done, not_done = concurrent.futures.wait(futures, timeout=timeout + LAYER_TIMEOUT_SLACK_SECONDS)
+        for future in done:
+            layer = futures[future]
+            try:
+                hits, rejected, latency_ms = future.result()
+            except Exception as exc:
+                latency_ms = int((time.monotonic() - starts[future]) * 1000)
+                statuses[layer] = status_entry("error", 0, latency_ms, str(exc))
+                continue
+            layer_hits[layer] = hits
+            rejected_hits += rejected
+            statuses[layer] = status_entry("ok", len(hits), latency_ms)
+
+        for future in not_done:
+            layer = futures[future]
+            latency_ms = int((time.monotonic() - starts[future]) * 1000)
+            statuses[layer] = status_entry("error", 0, latency_ms, f"timeout after {timeout:g}s")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    merged_hits = round_robin(layer_hits, queried_layers)
+    ts = utc_z(now)
+    scratch_path = write_scratch(expand_path(scratch_dir), query, ts, statuses, merged_hits)
+    stats = {
+        "ts": ts,
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest()[:12],
+        "layers_queried": queried_layers,
+        "per_layer": statuses,
+        "sm_queried": "sm" in queried_layers,
+        "rejected_hits": rejected_hits,
+    }
+    append_stats(expand_path(stats_path), stats)
+    all_failed = all(statuses[layer]["status"] == "error" for layer in queried_layers)
+    return {
+        "ts": ts,
+        "layers_queried": queried_layers,
+        "per_layer": statuses,
+        "hits": merged_hits,
+        "top_hits": merged_hits[:limit],
+        "scratch_path": str(scratch_path),
+        "rejected_hits": rejected_hits,
+        "stats": stats,
+        "exit_code": 1 if all_failed else 0,
+    }
+
+
+def render_human(result):
+    lines = []
+    for layer in result["layers_queried"]:
+        status = result["per_layer"][layer]
+        reason = f" {status['error']}" if status.get("error") else ""
+        lines.append(f"layer={layer} status={status['status']} hits={status['hits']} latency_ms={status['latency_ms']}{reason}")
+    lines.append(f"stats rejected_hits={result['rejected_hits']} scratch={result['scratch_path']}")
+    lines.append("")
+    for hit in result["top_hits"]:
+        snippet = f" | {hit['snippet']}" if hit["snippet"] else ""
+        lines.append(f"- [{hit['layer']}] {hit['pointer']} | {hit['title']}{snippet}")
+    if not result["top_hits"]:
+        lines.append("- no hits")
+    lines.append("")
+    lines.append(f"scratch: {result['scratch_path']}")
+    return "\n".join(lines)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Query family-memory recall layers.")
+    parser.add_argument("query")
+    parser.add_argument("--layers", default=",".join(DEFAULT_LAYERS), help="comma-separated layers: sm,meili,grep")
+    parser.add_argument("--local-only", action="store_true", help="skip Supermemory")
+    parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--json", action="store_true", help="emit merged result JSON")
+    parser.add_argument("--scratch-dir", default=DEFAULT_SCRATCH_DIR)
+    parser.add_argument("--stats-path", default=DEFAULT_STATS_PATH)
+    parser.add_argument("--sm-container", default=DEFAULT_SM_CONTAINER)
+    parser.add_argument("--grep-root", action="append", default=None)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "--":
+        argv = [*argv[2:], argv[1]]
+    args = parser.parse_args(argv)
+    try:
+        if args.limit < 1:
+            raise RecallError("--limit must be at least 1")
+        layers = parse_layers(args.layers)
+        grep_roots = list(DEFAULT_GREP_ROOTS)
+        if args.grep_root:
+            grep_roots.extend(args.grep_root)
+        result = recall(
+            args.query,
+            layers=layers,
+            local_only=args.local_only,
+            limit=args.limit,
+            scratch_dir=args.scratch_dir,
+            stats_path=args.stats_path,
+            sm_container=args.sm_container,
+            grep_roots=grep_roots,
+        )
+    except RecallError as exc:
+        parser.error(str(exc))
+    if args.json:
+        print(json.dumps({key: value for key, value in result.items() if key != "exit_code"}, indent=2, sort_keys=True))
+    else:
+        print(render_human(result))
+    return result["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

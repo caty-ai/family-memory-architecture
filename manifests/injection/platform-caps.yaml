@@ -1,0 +1,41 @@
+# Platform-level injection caps (central table — per-agent manifests reference
+# these by platform key; never hand-copy values into agent manifests).
+# Unit: chars = JS String.length (UTF-16 code units). For Japanese BMP text
+# 1 char == 1 unit, so wc -m on UTF-8 matches; wc -c (bytes) does NOT.
+#
+# max_chars policy: per-file max_chars is REQUIRED and must be a positive integer
+# (null is not allowed; injection-lint rejects it). It is a file-level self-imposed
+# budget, distinct from the platform hard caps in this table.
+
+platforms:
+  openclaw:
+    # Source: OpenClaw dist constants (grep your local install to verify;
+    # values below were verified against a real install).
+    per_file_chars: 20000        # BOOTSTRAP_MAX_CHARS
+    context_per_file_chars: 12000 # BOOTSTRAP_CONTEXT_MAX_CHARS — the cap that
+                                  # silently truncates oversized MEMORY.md files
+    total_chars: 60000           # BOOTSTRAP_TOTAL_MAX_CHARS
+    verified_at: "2026-07-08"
+    verify_hint: "grep -roh 'BOOTSTRAP_[A-Z_]*CHARS[ =]*[0-9e_.]*' <dist>/*.js"
+  hermes-profile:
+    # Hermes Agent profile workspaces. Runtime injection caps are UNVERIFIED —
+    # Hermes is a separate implementation, not an OpenClaw fork, so the OpenClaw
+    # dist constants above do NOT apply. Agents running on OpenClaw keep
+    # platform: openclaw even if a same-named hermes profile dir exists.
+    # Null caps mean injection-lint enforces only per-file self-imposed budgets.
+    per_file_chars: null
+    context_per_file_chars: null
+    total_chars: null
+    verified_at: null
+    verify_hint: "inspect Hermes source / injection assembly; confirm runtime caps"
+    note: "lint-side self-budget only; hard caps unknown until verified against hermes source"
+  claude-code:
+    # No hard platform truncation of CLAUDE.md/MEMORY.md; budget is a
+    # self-imposed context-tax target (see manifests/fixed-injection.yaml).
+    per_file_chars: null
+    context_per_file_chars: null
+    total_chars: null
+    note: "governed by fixed-injection.yaml byte budgets (context tax), not a runtime cap"
+
+# Lint policy: warn at warn_ratio of the *smallest applicable* cap.
+warn_ratio: 0.8

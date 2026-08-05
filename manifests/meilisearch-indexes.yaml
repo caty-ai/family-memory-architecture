@@ -1,0 +1,186 @@
+# meilisearch-indexes.yaml — Family Meilisearch index manifest (DESIGN §C3)
+#
+# Role:
+#   - The single allow-list of indexes that may exist on the family search
+#     surface (the shared Meilisearch instance).
+#   - **The permission contract**: only entries with `status: active` may be
+#     written to or created. `active-existing` declares an index that already
+#     exists but is outside this repo's ingest scope; `reserved` reserves a
+#     future slot (creation itself is forbidden until it passes its gate).
+#     A uid merely appearing in this file grants nothing — validators and
+#     ingest must check `status` (scripts/meili-ingest does).
+#   - The ingest script refuses to write to any index not listed here
+#     (defense in depth).
+#   - Primary enforcement is the DB layer's index-scoped API keys; this file
+#     is the second line of defense (DESIGN §2 principle 3).
+#   - A drift-check job (see manifests/jobs.yaml) verifies manifest → real
+#     index set / schema / doc counts / staleness.
+#
+# Notation: quote any string value containing `#` or `'` (the constrained
+# parser treats unquoted `#` as a comment start).
+#
+# This file ships as a worked example: replace endpoint URLs and owners with
+# your own. Index uids `family-vault` / `family-hot` are the contract the
+# bundled scripts and tests expect.
+
+version: 1
+generated_at: "2026-08-05"   # hand-edited (not subject to the §5 generated_at rule for generated artifacts)
+design_ref: "DESIGN §C3"
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+endpoints:
+  family:
+    desc: "Family shared search surface (canonical). Meilisearch bound to a private-network IP only (never public)"
+    url: "http://192.0.2.10:7700"   # example address — replace with your private (e.g. Tailscale) IP
+    network: private-only
+    owner: agent-b
+  local-dev:
+    desc: "Local development/verification on the primary agent's machine. May only be used to validate the family manifest"
+    url: "http://localhost:7700"
+    network: localhost
+    owner: agent-a
+
+# ---------------------------------------------------------------------------
+# Key policy (issuing and custody belong to the server-side agent's operator;
+# values never appear in this repo or the vault)
+# ---------------------------------------------------------------------------
+keys:
+  policy:
+    - "the master key never leaves the search server (no copies on agent machines)"
+    - "write keys are index-scoped: one target index + declared actions only + expiresAt"
+    - "read keys are search-only (may span all family indexes)"
+    - "store keys in a password manager / credential store; the pre-commit secret-scan rejects any that leak into the repo or vault"
+  rotation:
+    owner: agent-b
+    cadence: quarterly
+  env_conventions:
+    # Environment variable names the ingest/search scripts read (never write values here)
+    url: FAMILY_MEILI_URL
+    read_key: FAMILY_MEILI_READ_KEY
+    write_key_pattern: "FAMILY_MEILI_WRITE_KEY_<INDEX_UID uppercased, hyphens to underscores>"
+    examples:
+      - FAMILY_MEILI_WRITE_KEY_FAMILY_VAULT
+      - FAMILY_MEILI_WRITE_KEY_FAMILY_HOT
+
+# ---------------------------------------------------------------------------
+# Fail-closed checks
+# ---------------------------------------------------------------------------
+fail_closed_checks:
+  - id: bind-check
+    desc: "Meilisearch is not bound to a public interface (private-network IP only)"
+    cadence: weekly
+  - id: acl-check
+    desc: "Network ACL matches the expected machines (agent hosts on the private network only)"
+    cadence: weekly
+  - id: drift-check
+    desc: "manifest → real index reconciliation: index set / schema / doc count delta thresholds / staleness SLO"
+    cadence: weekly
+
+# ---------------------------------------------------------------------------
+# Index definitions
+# ---------------------------------------------------------------------------
+# Common fields per index:
+#   uid / desc / owner_write (who writes) / key_actions (write key actions)
+#   source (the canonical store. An index is a search cache, never the canonical copy — DESIGN §5)
+#   ingest (script and host) / refresh_trigger / staleness_slo_hours
+#   retention / schema (primaryKey and main fields)
+# The mandatory _ingest_by / _ingest_at stamps (attribution audit, DESIGN §C3)
+# apply to ingest owned by this repo (docs written by scripts/meili-ingest).
+# `active-existing` pipelines are exempt — drift-check verifies only index
+# existence and doc counts for those.
+
+indexes:
+  - uid: family-vault
+    desc: "family-vault markdown full text (shared decisions, projects, references)"
+    status: active
+    owner_write: agent-a
+    key_actions: ["documents.add", "tasks.get"]   # tasks.get is required for async-task verification during ingest; read-only telemetry, adds no write power
+    source: "~/family-vault (replicated by your sync layer, e.g. Syncthing. The canonical copy is the vault files themselves)"
+    ingest:
+      script: scripts/meili-ingest
+      host: laptop
+    refresh_trigger: "nightly + on-demand (manual after bulk vault updates)"
+    staleness_slo_hours: 26
+    retention: "mirror of the vault. Orphan docs from deleted/renamed files are detected by drift-check and deleted server-side (the write key deliberately lacks documents.delete)"
+    schema:
+      primaryKey: id
+      fields: [id, path, directory, title, tags, modified, content, _ingest_by, _ingest_at]
+      searchable: [title, content, tags]
+      filterable: [directory, tags, _ingest_by]
+
+  - uid: family-hot
+    desc: "family-hot.md hot-item event archive (1 item = 1 doc, append-only)"
+    status: active
+    owner_write: agent-a
+    key_actions: ["documents.add", "tasks.get"]   # tasks.get is required for async-task verification during ingest; read-only telemetry, adds no write power
+    source: "family-vault/00_index/family-hot.md (generated artifact. Canonical sources are the inbox events + their vault promotions)"
+    ingest:
+      script: scripts/meili-ingest
+      host: laptop
+    refresh_trigger: "after family-hot.md regeneration (nightly + on demand)"
+    staleness_slo_hours: 26
+    retention: "permanent archive (append-only). Item ids are stable, so re-ingest is an idempotent upsert. Expired items stay searchable as history — the source of truth for what is currently active is family-hot.md itself; this index is for recall of past events"
+    schema:
+      primaryKey: id
+      fields: [id, class, text, ptr, owner, priority, at, _ingest_by, _ingest_at]
+      searchable: [text]
+      filterable: [class, owner, priority, _ingest_by]
+
+  - uid: kg-entities
+    desc: "Knowledge Graph entities (pre-existing index, schema unchanged)"
+    status: active-existing
+    owner_write: agent-c      # KG writes are Agent C's exclusive right (DESIGN §C7). Operated on the server host
+    key_actions: ["documents.add"]
+    source: "knowledge.db (the KG is canonical)"
+    ingest:
+      script: "existing pipeline outside this repo"
+      host: server
+    refresh_trigger: "existing operation unchanged"
+    staleness_slo_hours: 168
+    retention: "existing operation unchanged"
+    schema:
+      primaryKey: id
+      fields: "existing schema kept (out of scope here; drift-check only sees index existence and doc counts)"
+
+  - uid: lcm-summaries
+    desc: "Long-conversation-memory summaries (pre-existing index, schema unchanged)"
+    status: active-existing
+    owner_write: agent-b
+    key_actions: ["documents.add"]
+    source: "LCM pipeline (outside this repo)"
+    ingest:
+      script: "existing pipeline outside this repo"
+      host: server
+    refresh_trigger: "existing operation unchanged"
+    staleness_slo_hours: 168
+    retention: "existing operation unchanged"
+    schema:
+      primaryKey: id
+      fields: "existing schema kept (out of scope here; drift-check only sees index existence and doc counts)"
+
+  - uid: "agent-shared-summaries-{agent}"
+    desc: "Per-agent shared-approved summaries. Creation forbidden until it passes its measurement gate"
+    status: reserved
+    owner_write: tbd
+    key_actions: []
+    source: tbd
+    ingest:
+      script: tbd
+      host: tbd
+    refresh_trigger: tbd
+    staleness_slo_hours: null
+    retention: tbd
+    schema:
+      primaryKey: id
+      fields: tbd
+
+# ---------------------------------------------------------------------------
+# Personal plane (outside this manifest — for reference)
+# ---------------------------------------------------------------------------
+# The primary agent's local Meilisearch (localhost:7700) may run personal
+# indexes (transcripts, scratch, a local replica of family-vault) for its own
+# recall layer. Those are personal indexes outside this allow-list and key
+# policy. Note family-vault exists under the same name locally, so the ingest
+# script switches by endpoint (FAMILY_MEILI_URL vs localhost).

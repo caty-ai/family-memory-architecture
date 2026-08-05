@@ -1,0 +1,742 @@
+#!/usr/bin/env python3
+"""Lint the family vault for broken internal links, review drift, and secrets."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
+
+
+DEFAULT_VAULT_ROOT = "~/family-vault"
+DEFAULT_ARCHIVE_DIR = "~/archive"
+OVERSIZE_BYTES = 1_048_576
+SECRET_BATCH_SIZE = 50
+ROOT_BUCKET_RE = re.compile(r"^[0-9]{2}_")
+URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+WIKILINK_RE = re.compile(r"(!)?\[\[([^\]]+)\]\]")
+INLINE_CODE_RE = re.compile(r"`+[^`]*`+")
+SAFE_MODE_RE = re.compile(r"^[a-z0-9-]+$")
+MUTABLE_STATE_PATTERNS = (
+    "*.lock",
+    "*.cursor",
+    "*.tmp",
+    "*.db",
+    "*.sqlite*",
+    "*.mdb",
+    "*.ldb",
+    "*.cache",
+    "*.counter",
+    "*.offset",
+    "*-journal",
+    "*-wal",
+    "*-shm",
+)
+MUTABLE_STATE_BARE_NAMES = frozenset({"cursor", "counter", "cache"})
+MUTABLE_STATE_TOOLING_DIRS = frozenset({".stfolder", ".stversions", ".obsidian", ".git"})
+STALE_TMP_SECONDS = 3600
+
+
+class VaultLintError(Exception):
+    """Raised when vault-lint cannot complete a run."""
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def expand_path(path_text: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def heartbeat_path(mode: str) -> Path:
+    base = os.environ.get("FMA_HEARTBEAT_DIR") or "~/.claude/state/heartbeats"
+    safe_mode = mode if SAFE_MODE_RE.fullmatch(mode) else "_invalid-mode"
+    return expand_path(base) / f"vault-lint-{safe_mode}.json"
+
+
+def write_heartbeat(mode: str, status: str, reason: str | None, docs: int, started: float) -> None:
+    path = heartbeat_path(mode)
+    fail_count = 0
+    try:
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            fail_count = int(previous.get("fail_count", 0))
+    except (OSError, ValueError, TypeError):
+        fail_count = 0
+    fail_count = 0 if status == "ok" else fail_count + 1
+    payload = {
+        "job": f"vault-lint-{mode}",
+        "last_run": utc_now_iso(),
+        "status": status,
+        "fail_count": fail_count,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "docs": docs,
+        "mode": mode,
+    }
+    if status == "fail":
+        payload["reason"] = reason or "failed"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"warning: heartbeat write failed: {exc}", file=sys.stderr)
+
+
+def report_dir(args) -> Path:
+    if args.report_dir:
+        return expand_path(args.report_dir)
+    return expand_path(os.environ.get("FMA_VAULT_LINT_DIR") or "~/.claude/state/vault-lint")
+
+
+def write_report(args, report: dict) -> Path | None:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = report_dir(args) / f"report-{args.mode}-{stamp}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+    except OSError as exc:
+        print(f"warning: report write failed: {exc}", file=sys.stderr)
+        return None
+
+
+def is_dot_path(rel: Path) -> bool:
+    return any(part.startswith(".") for part in rel.parts)
+
+
+def rel_text(path: Path, vault_root: Path) -> str:
+    return path.relative_to(vault_root).as_posix()
+
+
+def iter_vault_files(vault_root: Path, include_dot_paths: bool = False):
+    for path in sorted(vault_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(vault_root)
+        if not include_dot_paths and is_dot_path(rel):
+            continue
+        yield path
+
+
+def iter_md_files(vault_root: Path) -> list[Path]:
+    return [path for path in iter_vault_files(vault_root) if path.suffix.lower() == ".md"]
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def strip_code(text: str) -> str:
+    lines = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            lines.append("")
+            continue
+        if in_fence:
+            lines.append("")
+            continue
+        lines.append(INLINE_CODE_RE.sub("", line))
+    return "\n".join(lines)
+
+
+def parse_frontmatter(text: str) -> dict:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}
+    meta = {}
+    for raw_line in text[4:end].splitlines():
+        if ":" not in raw_line:
+            continue
+        key, _, value = raw_line.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            meta[key] = value
+    return meta
+
+
+def frontmatter_true(meta: dict, key: str) -> bool:
+    return str(meta.get(key, "")).strip().lower() == "true"
+
+
+def wikilink_target(raw: str) -> str:
+    target = raw.split("|", 1)[0].split("#", 1)[0].strip()
+    return target
+
+
+def collect_links(path: Path, vault_root: Path) -> list[dict]:
+    text = strip_code(read_text(path))
+    links = []
+    for match in WIKILINK_RE.finditer(text):
+        target = wikilink_target(match.group(2))
+        if not target or URL_SCHEME_RE.match(target):
+            continue
+        links.append({"source": rel_text(path, vault_root), "target": target, "embed": bool(match.group(1))})
+    return links
+
+
+def index_paths(paths: list[Path], vault_root: Path) -> dict:
+    exact = {}
+    basename = defaultdict(list)
+    stem = defaultdict(list)
+    for path in paths:
+        rel = rel_text(path, vault_root)
+        exact[rel] = rel
+        basename[path.name].append(rel)
+        stem[path.stem].append(rel)
+    return {"exact": exact, "basename": basename, "stem": stem}
+
+
+def exact_candidates(target: str, embed: bool) -> list[str]:
+    normalized = target.lstrip("/")
+    candidates = [normalized]
+    if not PurePosixPath(normalized).suffix:
+        candidates.append(f"{normalized}.md")
+    elif normalized.lower().endswith(".md"):
+        candidates.append(normalized[:-3])
+    return candidates if embed else [item for item in candidates if item.lower().endswith(".md")]
+
+
+def resolve_link(target: str, embed: bool, md_index: dict, all_index: dict) -> tuple[bool, list[str]]:
+    index = all_index if embed else md_index
+    for candidate in exact_candidates(target, embed):
+        if candidate in index["exact"]:
+            return True, [index["exact"][candidate]]
+
+    base = PurePosixPath(target).name
+    matches = []
+    if PurePosixPath(base).suffix:
+        matches.extend(index["basename"].get(base, []))
+    else:
+        matches.extend(index["stem"].get(base, []))
+        if embed:
+            matches.extend(index["basename"].get(base, []))
+    unique = sorted(set(matches))
+    return bool(unique), unique
+
+
+def finding(rule: str, path: str, detail: str, severity: str) -> dict:
+    return {"rule": rule, "path": path, "detail": detail, "severity": severity}
+
+
+def check_dead_links(md_files: list[Path], vault_root: Path, md_index: dict, all_index: dict) -> tuple[list[dict], dict, set[str]]:
+    findings = []
+    inbound = defaultdict(set)
+    index_referenced = set()
+
+    for path in md_files:
+        source = rel_text(path, vault_root)
+        source_name = path.name
+        is_index_source = source_name in {"index.md", "README.md"} or path.stem.endswith("_index")
+        for link in collect_links(path, vault_root):
+            ok, matches = resolve_link(link["target"], link["embed"], md_index, all_index)
+            if not ok:
+                findings.append(
+                    finding("dead-link", source, f"missing wikilink target [[{link['target']}]]", "warning")
+                )
+                continue
+            for target in matches:
+                if target.lower().endswith(".md") and target != source:
+                    inbound[target].add(source)
+                if is_index_source and target.lower().endswith(".md"):
+                    index_referenced.add(target)
+    return findings, inbound, index_referenced
+
+
+def check_orphans(md_files: list[Path], vault_root: Path, inbound: dict, index_referenced: set[str]) -> list[dict]:
+    findings = []
+    for path in md_files:
+        rel = rel_text(path, vault_root)
+        parts = path.relative_to(vault_root).parts
+        if parts and parts[0] in {"00_index", "40_journals"}:
+            continue
+        meta = parse_frontmatter(read_text(path))
+        if frontmatter_true(meta, "orphan-ok"):
+            continue
+        if inbound.get(rel) or rel in index_referenced:
+            continue
+        findings.append(finding("orphan", rel, "zero inbound wikilinks and not referenced by an index", "warning"))
+    return findings
+
+
+def parse_date(value: str):
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def check_stale_claims(md_files: list[Path], vault_root: Path, now: datetime) -> list[dict]:
+    findings = []
+    today = now.date()
+    for path in md_files:
+        rel = rel_text(path, vault_root)
+        meta = parse_frontmatter(read_text(path))
+        status = str(meta.get("status", "")).strip()
+        if status == "draft" or status.startswith("draft-for-"):
+            findings.append(finding("stale-claim", rel, f"status is {status}", "warning"))
+        for key in ("review-by", "expires"):
+            parsed = parse_date(str(meta.get(key, "")))
+            if parsed is not None and parsed < today:
+                findings.append(finding("stale-claim", rel, f"{key} date is in the past: {parsed.isoformat()}", "warning"))
+
+        parts = path.relative_to(vault_root).parts
+        if parts and parts[0] == "25_review-pending":
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            age_days = (now - mtime).total_seconds() / 86400
+            if age_days > 90:
+                findings.append(
+                    finding("stale-claim", rel, f"25_review-pending file older than 90 days ({int(age_days)}d)", "fail")
+                )
+            elif age_days > 30:
+                findings.append(
+                    finding("stale-claim", rel, f"25_review-pending file older than 30 days ({int(age_days)}d)", "warning")
+                )
+    return findings
+
+
+def check_root_orphans(vault_root: Path) -> list[dict]:
+    findings = []
+    try:
+        entries = sorted(vault_root.iterdir())
+    except OSError as exc:
+        print(f"warning: root-orphan scan failed: {exc}", file=sys.stderr)
+        return findings
+
+    for path in entries:
+        name = path.name
+        try:
+            is_symlink = path.is_symlink()
+        except OSError as exc:
+            print(f"warning: root-orphan entry skipped: {path}: {exc}", file=sys.stderr)
+            continue
+        if is_symlink:
+            findings.append(
+                finding(
+                    "root-orphan",
+                    rel_text(path, vault_root),
+                    "unclassified entry at vault root (see where-to-write)",
+                    "warning",
+                )
+            )
+            continue
+        try:
+            is_dir = path.is_dir()
+            is_file = path.is_file()
+        except OSError as exc:
+            print(f"warning: root-orphan entry skipped: {path}: {exc}", file=sys.stderr)
+            continue
+        if name.startswith("."):
+            continue
+        if is_dir and ROOT_BUCKET_RE.match(name):
+            continue
+        if is_file and name == "README.md":
+            continue
+        findings.append(
+            finding(
+                "root-orphan",
+                rel_text(path, vault_root),
+                "unclassified entry at vault root (see where-to-write)",
+                "warning",
+            )
+        )
+    return findings
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
+def check_oversize(files: list[Path], vault_root: Path) -> list[dict]:
+    findings = []
+    for path in files:
+        size = path.stat().st_size
+        if size > OVERSIZE_BYTES:
+            if path.suffix.lower() == ".md":
+                findings.append(finding("oversize", rel_text(path, vault_root), f"file is {size} bytes", "warning"))
+            else:
+                findings.append(
+                    finding(
+                        "binary-oversize",
+                        rel_text(path, vault_root),
+                        f"non-md file is {size} bytes — exit rule §5.5: move to archive",
+                        "warning",
+                    )
+                )
+    return findings
+
+
+def check_mutable_state(files: list[Path], vault_root: Path, now: datetime) -> list[dict]:
+    findings = []
+    for path in files:
+        name = path.name.lower()
+        matched_patterns = [pattern for pattern in MUTABLE_STATE_PATTERNS if fnmatch.fnmatch(name, pattern)]
+        if not matched_patterns and name not in MUTABLE_STATE_BARE_NAMES:
+            continue
+        if matched_patterns == ["*.tmp"]:
+            try:
+                age_seconds = now.timestamp() - path.stat().st_mtime
+            except OSError as exc:
+                print(f"warning: mutable-state tmp stat failed: {path}: {exc}", file=sys.stderr)
+                continue
+            if age_seconds <= STALE_TMP_SECONDS:
+                continue
+        findings.append(
+            finding(
+                "mutable-state",
+                rel_text(path, vault_root),
+                "mutable state must live under host-local ~/.claude/state/<name>/",
+                "fail",
+            )
+        )
+    return findings
+
+
+def check_archive_unused(archive_dir: str, binary_oversize_count: int, stale_days: int, now: datetime) -> list[dict]:
+    if binary_oversize_count == 0:
+        return []
+
+    path = expand_path(archive_dir).absolute()
+    path_text = str(path)
+    stale_detail = f"exit candidates exist but archive has received nothing for {stale_days}+ days (or is empty/missing)"
+    try:
+        archive_exists = path.is_dir()
+    except OSError as exc:
+        print(f"warning: archive-unused inspect failed: {path}: {exc}", file=sys.stderr)
+        return [finding("archive-unused", path_text, stale_detail, "warning")]
+    if not archive_exists:
+        return [finding("archive-unused", path_text, stale_detail, "warning")]
+
+    try:
+        entries = sorted(path.iterdir())
+    except OSError as exc:
+        print(f"warning: archive-unused scan failed: {path}: {exc}", file=sys.stderr)
+        return [finding("archive-unused", path_text, stale_detail, "warning")]
+
+    newest = None
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            entry_stat = entry.lstat()
+            if stat.S_ISLNK(entry_stat.st_mode):
+                entry.resolve(strict=True)
+        except OSError as exc:
+            print(f"warning: archive-unused entry skipped: {entry}: {exc}", file=sys.stderr)
+            continue
+        mtime = datetime.fromtimestamp(entry_stat.st_mtime, timezone.utc)
+        if newest is None or mtime > newest:
+            newest = mtime
+
+    if newest is None:
+        return [finding("archive-unused", path_text, stale_detail, "warning")]
+    if newest < now - timedelta(days=stale_days):
+        return [finding("archive-unused", path_text, stale_detail, "warning")]
+    return []
+
+
+def secret_path_from_line(line: str, vault_root: Path) -> str:
+    match = re.match(r"^(.+?):\d+:", line)
+    if not match:
+        return ""
+    path_text = match.group(1)
+    try:
+        return Path(path_text).resolve().relative_to(vault_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path_text
+
+
+def check_secrets(files: list[Path], vault_root: Path) -> list[dict]:
+    script = Path(__file__).resolve().parent / "secret-scan"
+    findings = []
+    for index in range(0, len(files), SECRET_BATCH_SIZE):
+        batch = files[index : index + SECRET_BATCH_SIZE]
+        if not batch:
+            continue
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), *[str(path) for path in batch]],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise VaultLintError(f"secret-scan failed to start: {exc}") from exc
+        if result.returncode not in (0, 2):
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            raise VaultLintError(f"secret-scan failed: {detail}")
+        for line in result.stdout.splitlines():
+            if line.strip():
+                findings.append(finding("secret", secret_path_from_line(line, vault_root), line, "fail"))
+    return findings
+
+
+def is_recent(path_text: str, vault_root: Path, cutoff: datetime) -> bool:
+    try:
+        path = vault_root / path_text
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError as exc:
+        print(f"warning: light filter stat failed: {exc}", file=sys.stderr)
+        return False
+    return mtime >= cutoff
+
+
+def is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_mutable_archive_dir(archive_dir: str, vault_root: Path) -> Path | None:
+    path = expand_path(archive_dir)
+    if not path.is_absolute():
+        path = vault_root / path
+    path = path.resolve()
+    if is_within(vault_root, path):
+        print(
+            f"warning: invalid --archive-dir for mutable-state scan: {path} "
+            "is the vault root or its ancestor; archive exemption disabled",
+            file=sys.stderr,
+        )
+        return None
+    return path
+
+
+def is_mutable_tooling_path(path: Path, vault_root: Path) -> bool:
+    directory_parts = path.relative_to(vault_root).parts[:-1]
+    return any(part in MUTABLE_STATE_TOOLING_DIRS for part in directory_parts)
+
+
+def normalize_legacy_allow(pattern: str) -> str:
+    normalized = pattern.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def is_legacy_allowed(path: Path, vault_root: Path, patterns: list[str]) -> bool:
+    rel = rel_text(path, vault_root)
+    return any(fnmatch.fnmatchcase(rel, normalize_legacy_allow(pattern)) for pattern in patterns)
+
+
+def apply_light_filter(findings: list[dict], vault_root: Path, since_days: int, now: datetime) -> list[dict]:
+    cutoff = now - timedelta(days=since_days)
+    exempt_rules = {"secret", "root-orphan", "binary-oversize", "archive-unused", "mutable-state"}
+    return [item for item in findings if item["rule"] in exempt_rules or is_recent(item["path"], vault_root, cutoff)]
+
+
+def build_report(args, vault_root: Path, files_scanned: int, findings: list[dict]) -> dict:
+    counts = {}
+    severity_counts = {"warning": 0, "fail": 0}
+    for item in findings:
+        counts[item["rule"]] = counts.get(item["rule"], 0) + 1
+        severity_counts[item["severity"]] = severity_counts.get(item["severity"], 0) + 1
+    return {
+        "mode": args.mode,
+        "vault_root": str(vault_root),
+        "since_days": args.since_days,
+        "files_scanned": files_scanned,
+        "counts": dict(sorted(counts.items())),
+        "severity_counts": severity_counts,
+        "findings": findings,
+    }
+
+
+def scan(args, now: datetime) -> tuple[dict, int]:
+    vault_root = expand_path(args.vault_root).resolve()
+    if not vault_root.is_dir():
+        raise VaultLintError(f"vault root not found: {vault_root}")
+
+    md_files = iter_md_files(vault_root)
+    all_files = list(iter_vault_files(vault_root))
+    archive_dir = resolve_mutable_archive_dir(args.archive_dir, vault_root)
+    mutable_state_files = [
+        path
+        for path in iter_vault_files(vault_root, include_dot_paths=True)
+        if not is_mutable_tooling_path(path, vault_root)
+        and (archive_dir is None or not is_within(path, archive_dir))
+        and not is_legacy_allowed(path, vault_root, args.legacy_allow)
+    ]
+    md_index = index_paths(md_files, vault_root)
+    all_index = index_paths(all_files, vault_root)
+
+    dead_link_findings, inbound, index_referenced = check_dead_links(md_files, vault_root, md_index, all_index)
+    findings = []
+    findings.extend(dead_link_findings)
+    findings.extend(check_root_orphans(vault_root))
+    findings.extend(check_orphans(md_files, vault_root, inbound, index_referenced))
+    findings.extend(check_stale_claims(md_files, vault_root, now))
+    findings.extend(check_secrets(all_files, vault_root))
+    findings.extend(check_mutable_state(mutable_state_files, vault_root, now))
+    oversize_findings = check_oversize(all_files, vault_root)
+    findings.extend(oversize_findings)
+    binary_oversize_count = sum(1 for item in oversize_findings if item["rule"] == "binary-oversize")
+    findings.extend(check_archive_unused(args.archive_dir, binary_oversize_count, args.archive_stale_days, now))
+    findings.sort(key=lambda item: (item["rule"], item["path"], item["detail"]))
+
+    if args.mode == "light":
+        findings = apply_light_filter(findings, vault_root, args.since_days, now)
+
+    report = build_report(args, vault_root, len(md_files), findings)
+    exit_code = 2 if report["severity_counts"].get("fail", 0) else 0
+    return report, exit_code
+
+
+def print_human(report: dict) -> None:
+    print(f"vault-lint mode={report['mode']} files_scanned={report['files_scanned']}")
+    if report["mode"] == "light":
+        print(f"light mode window: files modified within {report['since_days']} day(s)")
+    print("counts:")
+    for rule in sorted(report["counts"]):
+        warning_count = sum(
+            1 for item in report["findings"] if item["rule"] == rule and item["severity"] == "warning"
+        )
+        fail_count = sum(1 for item in report["findings"] if item["rule"] == rule and item["severity"] == "fail")
+        print(f"  {rule}: {report['counts'][rule]} (warning={warning_count} fail={fail_count})")
+    if not report["counts"]:
+        print("  none: 0")
+    print(
+        "severity: "
+        f"warning={report['severity_counts'].get('warning', 0)} "
+        f"fail={report['severity_counts'].get('fail', 0)}"
+    )
+    if not report["findings"]:
+        print("findings: none")
+        return
+    for rule in sorted({item["rule"] for item in report["findings"]}):
+        print(f"{rule}:")
+        for item in report["findings"]:
+            if item["rule"] == rule:
+                print(f"  {item['path']}: {item['detail']} [{item['severity']}]")
+
+
+def fail_summary(findings: list[dict]) -> str:
+    secret_count = sum(1 for item in findings if item["rule"] == "secret" and item["severity"] == "fail")
+    stale_90_count = sum(1 for item in findings if item["rule"] == "stale-claim" and item["severity"] == "fail")
+    mutable_state_count = sum(
+        1 for item in findings if item["rule"] == "mutable-state" and item["severity"] == "fail"
+    )
+    parts = []
+    if secret_count:
+        parts.append(f"{secret_count} secret finding(s)")
+    if stale_90_count:
+        parts.append(f"{stale_90_count} stale-claim(90d+) finding(s)")
+    if mutable_state_count:
+        parts.append(f"{mutable_state_count} mutable-state finding(s)")
+    return "vault-lint: " + ", ".join(parts or ["fail finding(s)"])
+
+
+def maybe_post_inbox(args, report: dict) -> None:
+    if not args.inbox_post or report["severity_counts"].get("fail", 0) == 0:
+        return
+    script = Path(__file__).resolve().parent / "hot-inbox-post"
+    summary = fail_summary(report["findings"])
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--kind",
+                "caution",
+                "--title",
+                "vault-lint fail findings",
+                "--summary",
+                summary,
+                "--canonical-path",
+                "family-vault/00_index/vault-lint.md",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        print(f"warning: hot-inbox-post failed: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        print(f"warning: hot-inbox-post failed: {detail}", file=sys.stderr)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Lint the family vault.")
+    parser.add_argument("--vault-root", default=DEFAULT_VAULT_ROOT)
+    parser.add_argument("--mode", choices=("light", "deep"), default="deep")
+    parser.add_argument("--since-days", type=int, default=8)
+    parser.add_argument("--archive-dir", default=DEFAULT_ARCHIVE_DIR)
+    parser.add_argument("--legacy-allow", action="append", default=[], metavar="PATH")
+    parser.add_argument("--archive-stale-days", type=positive_int, default=90)
+    parser.add_argument("--report-dir")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--no-heartbeat", action="store_true")
+    parser.add_argument("--inbox-post", action="store_true")
+    return parser.parse_args(argv)
+
+
+def error_report(args, reason: str) -> dict:
+    return {
+        "mode": args.mode,
+        "vault_root": str(expand_path(args.vault_root)),
+        "since_days": args.since_days,
+        "files_scanned": 0,
+        "counts": {},
+        "severity_counts": {"warning": 0, "fail": 0},
+        "findings": [],
+        "error": reason,
+    }
+
+
+def main(argv=None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    started = time.monotonic()
+    report = None
+    exit_code = 1
+    reason = None
+    try:
+        report, exit_code = scan(args, datetime.now(timezone.utc))
+        write_report(args, report)
+        maybe_post_inbox(args, report)
+        if args.json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            print_human(report)
+        return exit_code
+    except Exception as exc:
+        reason = str(exc)
+        report = error_report(args, reason)
+        write_report(args, report)
+        if args.json:
+            print(json.dumps(report, sort_keys=True))
+        print(f"vault-lint: error: {reason}", file=sys.stderr)
+        exit_code = 1
+        return exit_code
+    finally:
+        if not args.no_heartbeat:
+            status = "fail" if exit_code in (1, 2) else "ok"
+            docs = int((report or {}).get("files_scanned", 0))
+            write_heartbeat(args.mode, status, reason, docs, started)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

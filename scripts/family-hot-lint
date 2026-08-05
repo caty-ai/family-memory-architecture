@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Validate generated family-hot.md, its ledger, and the hot-inbox sources."""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+DEFAULT_VAULT_ROOT = "~/family-vault"
+SCHEMA_VERSION = "family-hot-event/v0"
+GENERATED_MARKER = "<!-- GENERATED-FILE: family-hot.md; DO NOT EDIT BY HAND -->"
+META_RE = re.compile(
+    r"^<!-- generator: .*; sources_sha256: ([0-9a-f]{64}); body_sha256: ([0-9a-f]{64}) -->$"
+)
+ROW_RE = re.compile(r"^- \[class:(\d+) id:([^\]]+)\].*\bptr: ([^;|)]+)")
+SIZE_CAP_BYTES = 2048
+CLASS_CAPS = {2: 1, 3: 3, 4: 5, 5: 5, 6: 5, 9: 3, 10: 1}
+KIND_CLASS_ALLOWED = {
+    "decision": {5},
+    "project": {2, 3, 6},
+    "blocker": {4, 6, 10},
+    "caution": {9},
+}
+# Keep in sync with hot-inbox-post and family-hot-generate (audit F4).
+SECRET_PATTERNS = [
+    re.compile(pattern)
+    for pattern in (
+        # lookbehind: task-management / risk-analysis must not match
+        r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}",
+        r"AKIA[0-9A-Z]{8,}",
+        r"ghp_[A-Za-z0-9]{8,}",
+        r"github_pat_[A-Za-z0-9_]{8,}",
+        r"AIza[A-Za-z0-9_-]{8,}",
+        r"xox[bap]-",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY",
+        r"Bearer [A-Za-z0-9._-]{16,}",
+    )
+]
+EVENT_ID_RE = re.compile(
+    r"^\d{8}T\d{6}Z__[A-Za-z0-9_-]+__(decision|project|blocker|caution|expire)__[A-Za-z0-9-]+__[0-9a-f]{8}$"
+)
+FREEZE_RE = re.compile(r"freeze|frozen|do not touch|don'?t touch|凍結|触らない|触るな", re.IGNORECASE)
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def parse_iso_datetime(value, field_name):
+    try:
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an ISO8601 datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def event_id_created_at(event_id):
+    try:
+        return datetime.strptime(event_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError("event_id timestamp is malformed") from exc
+
+
+def compute_body_sha256(raw_bytes):
+    lines = raw_bytes.splitlines(keepends=True)
+    body_bytes = b"".join(lines[:1] + lines[2:])
+    return hashlib.sha256(body_bytes).hexdigest()
+
+
+def finding(findings, severity, code, message):
+    findings.append({"severity": severity, "code": code, "message": message})
+
+
+def has_secret(text):
+    return any(pattern.search(text) for pattern in SECRET_PATTERNS)
+
+
+def canonical_pointer(event):
+    return event.get("canonical_url") or event.get("canonical_path") or ""
+
+
+def effective_caution_expiry(event):
+    if event.get("expires_at"):
+        return parse_iso_datetime(event["expires_at"], "expires_at")
+    if FREEZE_RE.search(str(event.get("title", ""))) or FREEZE_RE.search(str(event.get("summary", ""))):
+        return event["created_at_dt"] + timedelta(days=3)
+    return event["created_at_dt"] + timedelta(days=7)
+
+
+def read_event(path, findings, now):
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        finding(findings, "warn", "inbox-invalid-event", f"inbox event invalid: {path.name}: cannot read: {exc}")
+        return None, None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        finding(findings, "warn", "inbox-invalid-event", f"inbox event invalid: {path.name}: invalid UTF-8: {exc}")
+        return None, None
+    if has_secret(text):
+        finding(findings, "fail", "secret-in-inbox", f"secret-like pattern in inbox file: {path.name}")
+        return None, raw
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError as exc:
+        finding(findings, "warn", "inbox-invalid-event", f"inbox event invalid: {path.name}: malformed JSON: {exc}")
+        return None, raw
+    if not isinstance(event, dict):
+        finding(findings, "warn", "inbox-invalid-event", f"inbox event invalid: {path.name}: event JSON must be an object")
+        return None, raw
+    try:
+        if event.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("bad schema_version")
+        for field in ("event_id", "created_at", "created_by", "kind"):
+            if not event.get(field):
+                raise ValueError(f"missing required field {field}")
+        if not EVENT_ID_RE.fullmatch(event["event_id"]):
+            raise ValueError("event_id pattern mismatch")
+        if path.name != f"{event['event_id']}.json":
+            raise ValueError("event_id does not match inbox filename")
+        event["created_at_dt"] = parse_iso_datetime(event["created_at"], "created_at")
+        if event_id_created_at(event["event_id"]) != event["created_at_dt"].replace(microsecond=0):
+            finding(
+                findings,
+                "warn",
+                "event-timestamp-mismatch",
+                f"event_id timestamp does not match created_at: {path.name}",
+            )
+            return None, raw
+        if event["created_at_dt"] > now + timedelta(minutes=5):
+            finding(
+                findings,
+                "warn",
+                "event-created-in-future",
+                f"created_at is more than 5 minutes in the future: {path.name}",
+            )
+            return None, raw
+        if event.get("kind") == "expire":
+            if not event.get("target_event_id"):
+                raise ValueError("expire missing target_event_id")
+            return event, raw
+        for field in ("class", "title", "summary"):
+            if field not in event or event.get(field) is None or not str(event[field]).strip():
+                raise ValueError(f"missing {field}")
+        try:
+            event["class"] = int(event["class"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("class must be an integer") from exc
+        if not canonical_pointer(event):
+            raise ValueError("missing canonical pointer")
+        if event["class"] not in KIND_CLASS_ALLOWED.get(event["kind"], set()):
+            raise ValueError("kind/class mismatch")
+        if event.get("expires_at"):
+            parse_iso_datetime(event["expires_at"], "expires_at")
+        if event.get("next_review_at"):
+            parse_iso_datetime(event["next_review_at"], "next_review_at")
+    except (TypeError, ValueError) as exc:
+        finding(findings, "warn", "inbox-invalid-event", f"inbox event invalid: {path.name}: {exc}")
+        return None, raw
+    return event, raw
+
+
+def load_valid_events(inbox_dir, findings, now):
+    events = {}
+    if not inbox_dir.exists():
+        return events
+    for path in sorted(inbox_dir.glob("*.json")):
+        event, raw = read_event(path, findings, now)
+        if event is not None:
+            events[event["event_id"]] = {"event": event, "raw": raw, "path": path}
+    return events
+
+
+def validate_generated_file(output_path, findings):
+    sources_sha256 = None
+    try:
+        raw = output_path.read_bytes()
+    except OSError as exc:
+        finding(findings, "fail", "read-error", f"cannot read family-hot.md: {exc}")
+        return b"", [], sources_sha256
+    if len(raw) > SIZE_CAP_BYTES:
+        finding(findings, "fail", "size-exceeds-2048-bytes", f"family-hot.md is {len(raw)} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        finding(findings, "fail", "utf8-error", "family-hot.md is not valid UTF-8")
+        return raw, [], sources_sha256
+    if has_secret(text):
+        finding(findings, "fail", "secret-in-output", "secret-like pattern found in generated output")
+    lines = text.splitlines()
+    if not lines or lines[0] != GENERATED_MARKER:
+        finding(findings, "fail", "missing-marker", "line 1 generated marker is absent or malformed")
+    if len(lines) < 2:
+        finding(findings, "fail", "malformed-meta-line", "line 2 generator metadata is missing")
+    else:
+        match = META_RE.fullmatch(lines[1])
+        if not match:
+            finding(findings, "fail", "malformed-meta-line", "line 2 generator metadata is malformed")
+        else:
+            sources_sha256 = match.group(1)
+            if compute_body_sha256(raw) != match.group(2):
+                finding(findings, "fail", "body-sha256-mismatch", "body_sha256 does not match generated body")
+
+    counts = {}
+    rows = []
+    for line in lines:
+        if not line.startswith("- [class:"):
+            continue
+        class_match = re.match(r"^- \[class:(\d+) id:", line)
+        if class_match and int(class_match.group(1)) == 1:
+            continue
+        match = ROW_RE.match(line)
+        if not match:
+            finding(findings, "fail", "row-missing-pointer", f"rendered item row lacks canonical pointer: {line}")
+            continue
+        class_num = int(match.group(1))
+        event_id = match.group(2)
+        pointer = match.group(3).strip()
+        if class_num != 1:
+            if not pointer:
+                finding(findings, "fail", "row-missing-pointer", f"row for {event_id} has an empty pointer")
+            counts[class_num] = counts.get(class_num, 0) + 1
+            rows.append((class_num, event_id))
+    for class_num, count in sorted(counts.items()):
+        cap = CLASS_CAPS.get(class_num)
+        if cap is not None and count > cap:
+            finding(findings, "fail", "class-cap-exceeded", f"class {class_num} has {count} rows; cap is {cap}")
+    return raw, rows, sources_sha256
+
+
+def validate_ledger(ledger_path, inbox_dir, findings, output_sources_sha256):
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        finding(findings, "fail", "ledger-read-error", f"cannot read family-hot.sources.json: {exc}")
+        return {}
+    if output_sources_sha256 is not None and ledger.get("sources_sha256") != output_sources_sha256:
+        finding(findings, "fail", "ledger-output-mismatch", "ledger sources_sha256 does not match family-hot.md metadata")
+    for entry in ledger.get("events", []):
+        filename = entry.get("filename")
+        expected_sha = entry.get("sha256")
+        if not filename or not expected_sha:
+            finding(findings, "fail", "ledger-malformed", "ledger event entry lacks filename or sha256")
+            continue
+        path = inbox_dir / filename
+        try:
+            current_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            finding(findings, "fail", "ledger-source-missing", f"ledger source missing from inbox: {filename}")
+            continue
+        if current_sha != expected_sha:
+            finding(findings, "fail", "ledger-source-mutated", f"ledger source mutated after generation: {filename}")
+    return ledger
+
+
+def validate_sla_and_ttl(events, rows, now, findings):
+    rendered_ids = {event_id for _class_num, event_id in rows}
+    expired_targets = {
+        item["event"]["target_event_id"] for item in events.values() if item["event"].get("kind") == "expire"
+    }
+    for item in events.values():
+        event = item["event"]
+        if event.get("kind") == "expire":
+            continue
+        if event["event_id"] in expired_targets:
+            continue
+        if event.get("kind") == "caution":
+            if not event.get("expires_at"):
+                finding(findings, "warn", "caution-missing-expires-at", f"caution missing expires_at: {event['event_id']}")
+            expiry = effective_caution_expiry(event)
+            ttl_span = expiry - event["created_at_dt"]
+            if ttl_span > timedelta(days=14):
+                finding(findings, "fail", "caution-ttl-too-long", f"caution TTL exceeds 14 days: {event['event_id']}")
+            if now > expiry and event["event_id"] not in expired_targets:
+                finding(
+                    findings,
+                    "warn",
+                    "expired-caution-still-present",
+                    f"expired caution still present in inbox without expire event: {event['event_id']}",
+                )
+        if event.get("class") == 5 and event.get("promotion_pending"):
+            elapsed = now - event["created_at_dt"]
+            has_owner_and_review = bool(event.get("owner") and event.get("next_review_at"))
+            rendered_suffix = "" if event["event_id"] in rendered_ids else "-not-rendered"
+            if elapsed > timedelta(hours=72) and not has_owner_and_review:
+                finding(
+                    findings,
+                    "fail",
+                    f"promotion-pending-over-72h{rendered_suffix}",
+                    f"promotion_pending exceeds 72h without owner and next_review_at: {event['event_id']}",
+                )
+            elif elapsed > timedelta(hours=24):
+                finding(
+                    findings,
+                    "warn",
+                    f"promotion-pending-over-24h{rendered_suffix}",
+                    f"promotion_pending exceeds 24h: {event['event_id']}",
+                )
+
+
+def lint(args):
+    vault_root = expand_path(args.vault_root)
+    index_dir = vault_root / "00_index"
+    inbox_dir = index_dir / "hot-inbox"
+    output_path = index_dir / "family-hot.md"
+    ledger_path = index_dir / "family-hot.sources.json"
+    now = parse_iso_datetime(args.now, "--now") if args.now else datetime.now(timezone.utc)
+    findings = []
+
+    _raw, rows, output_sources_sha256 = validate_generated_file(output_path, findings)
+    ledger = validate_ledger(ledger_path, inbox_dir, findings, output_sources_sha256)
+    events = load_valid_events(inbox_dir, findings, now)
+    ledgered = {entry.get("filename") for entry in ledger.get("events", [])}
+    for item in events.values():
+        if item["path"].name not in ledgered:
+            finding(
+                findings,
+                "warn",
+                "inbox-not-in-ledger",
+                f"valid inbox event not in ledger (output is stale until next generate): {item['path'].name}",
+            )
+    validate_sla_and_ttl(events, rows, now, findings)
+
+    if args.json:
+        print(json.dumps(findings, indent=2, sort_keys=True))
+    else:
+        for item in findings:
+            print(f"{item['severity'].upper()}: {item['code']}: {item['message']}")
+        if not findings:
+            print("OK: family-hot lint passed")
+
+    if any(item["severity"] == "fail" for item in findings):
+        return 2
+    if any(item["severity"] == "warn" for item in findings):
+        return 1
+    return 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Lint generated family-hot.md and hot-inbox ledger.")
+    parser.add_argument("--vault-root", default=os.environ.get("FAMILY_HOT_VAULT", DEFAULT_VAULT_ROOT))
+    parser.add_argument("--now", help="ISO8601 current time override for deterministic tests")
+    parser.add_argument("--json", action="store_true", help="emit findings as JSON array")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    try:
+        return lint(parse_args(argv))
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

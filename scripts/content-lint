@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Lint role-scoped instruction content for stale facts and byte caps."""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print(
+        "content-lint: PyYAML is required (pip install pyyaml). "
+        "content-lint and injection-lint are the only two FMA scripts with a "
+        "dependency beyond the Python standard library.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+SEVERITIES = ("OK", "WARNING", "VIOLATION", "ERROR")
+AS_OF_RE = re.compile(r"\(as of ([0-9]{4}-[0-9]{2}-[0-9]{2})\)")
+HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+DEFAULT_ROLE_MATRIX = {
+    "role_matrix": {
+        "IDENTITY.md": ["values_emotional_guide"],
+        "SOUL.md": ["tone_style"],
+        "AGENTS.md": ["operational_rules"],
+        "TOOLS.md": ["environment_notes"],
+        "MEMORY.md": ["distilled_long_term"],
+    },
+    "heading_categories": {
+        "values_emotional_guide": ["values", "emotional guide"],
+        "tone_style": ["tone", "style", "voice"],
+        "operational_rules": ["rule", "workflow", "protocol", "operating", "execution", "verification", "constraint"],
+        "environment_notes": ["environment", "tool", "setup", "path", "workspace"],
+        "distilled_long_term": ["distilled", "long-term", "memory", "fact", "preference", "decision"],
+    },
+}
+
+
+class ContentLintError(Exception):
+    """Raised when content-lint cannot load its configuration."""
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def nonnegative_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 0") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
+def load_config(path_text=None):
+    if path_text is None:
+        return DEFAULT_ROLE_MATRIX
+    path = expand_path(path_text)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ContentLintError(f"cannot parse {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ContentLintError(f"cannot decode {path} as UTF-8: {exc}") from exc
+    except OSError as exc:
+        raise ContentLintError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ContentLintError(f"{path}: expected a YAML mapping")
+    if not isinstance(data.get("role_matrix"), dict):
+        raise ContentLintError(f"{path}: missing required role_matrix mapping")
+    if not isinstance(data.get("heading_categories"), dict):
+        raise ContentLintError(f"{path}: missing required heading_categories mapping")
+    for section in ("role_matrix", "heading_categories"):
+        for key, value in data[section].items():
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ContentLintError(f"{path}: {section}.{key} must be a list of strings")
+    return data
+
+
+def finding(scope, severity, message, **extra):
+    item = {"scope": scope, "severity": severity, "message": message}
+    item.update(extra)
+    return item
+
+
+def matrix_categories(path, role_matrix):
+    filename = Path(path).name.casefold()
+    for configured_name, categories in role_matrix.items():
+        configured = str(configured_name).casefold()
+        stem = configured.removesuffix(".md")
+        if filename == configured or filename.endswith(f"-{stem}.md") or filename.endswith(f"_{stem}.md"):
+            return categories
+    return None
+
+
+def heading_category(heading, heading_categories):
+    normalized = heading.casefold()
+    for category, keywords in heading_categories.items():
+        if any(str(keyword).casefold() in normalized for keyword in keywords):
+            return category
+    return None
+
+
+def role_matrix_findings(path, text, config):
+    allowed = matrix_categories(path, config["role_matrix"])
+    if allowed is None:
+        return []
+    findings = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        match = HEADING_RE.match(line)
+        if match is None:
+            continue
+        heading = match.group(1)
+        category = heading_category(heading, config["heading_categories"])
+        if category not in allowed:
+            findings.append(
+                finding(
+                    str(path),
+                    "WARNING",
+                    f"{path}: heading on line {line_number} is outside the role matrix: {heading}",
+                    line=line_number,
+                    heading=heading,
+                )
+            )
+    return findings
+
+
+def stale_as_of_findings(path, text, max_days, today):
+    findings = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        for match in AS_OF_RE.finditer(line):
+            date_text = match.group(1)
+            try:
+                as_of_date = datetime.date.fromisoformat(date_text)
+            except ValueError:
+                continue
+            stale_days = (today - as_of_date).days
+            if stale_days > max_days:
+                findings.append(
+                    finding(
+                        str(path),
+                        "WARNING",
+                        f"{path}: as-of date {date_text} on line {line_number} is {stale_days} days stale",
+                        line=line_number,
+                        as_of_date=date_text,
+                        stale_days=stale_days,
+                    )
+                )
+    return findings
+
+
+def lint_files(paths, config, as_of_max_days, byte_cap=None, total_byte_cap=None, today=None):
+    today = today or datetime.date.today()
+    findings = []
+    total_bytes = 0
+    readable_files = 0
+
+    for path_text in paths:
+        path = expand_path(path_text)
+        try:
+            data = path.read_bytes()
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            findings.append(finding(str(path), "ERROR", f"{path}: cannot decode UTF-8: {exc}"))
+            continue
+        except OSError as exc:
+            findings.append(finding(str(path), "ERROR", f"{path}: {exc}"))
+            continue
+
+        readable_files += 1
+        byte_count = len(data)
+        total_bytes += byte_count
+        before_count = len(findings)
+        findings.extend(role_matrix_findings(path, text, config))
+        findings.extend(stale_as_of_findings(path, text, as_of_max_days, today))
+        if byte_cap is not None and byte_count > byte_cap:
+            findings.append(
+                finding(
+                    str(path),
+                    "VIOLATION",
+                    f"{path}: {byte_count} bytes exceeds byte cap {byte_cap}",
+                    bytes=byte_count,
+                    byte_cap=byte_cap,
+                )
+            )
+        if len(findings) == before_count:
+            findings.append(finding(str(path), "OK", f"{path}: {byte_count} bytes checked", bytes=byte_count))
+
+    if total_byte_cap is not None:
+        if total_bytes > total_byte_cap:
+            findings.append(
+                finding(
+                    "total",
+                    "VIOLATION",
+                    f"total: {total_bytes} bytes exceeds total byte cap {total_byte_cap}",
+                    bytes=total_bytes,
+                    total_byte_cap=total_byte_cap,
+                )
+            )
+        elif readable_files == len(paths):
+            findings.append(
+                finding(
+                    "total",
+                    "OK",
+                    f"total: {total_bytes} bytes within total byte cap {total_byte_cap}",
+                    bytes=total_bytes,
+                    total_byte_cap=total_byte_cap,
+                )
+            )
+    return findings
+
+
+def result(findings):
+    summary = {severity: 0 for severity in SEVERITIES}
+    for item in findings:
+        summary[item["severity"]] += 1
+    summary["total"] = len(findings)
+    exit_code = 2 if summary["VIOLATION"] or summary["ERROR"] else 1 if summary["WARNING"] else 0
+    return {"findings": findings, "summary": summary, "exit_code": exit_code}
+
+
+def render_human(payload):
+    summary = payload["summary"]
+    lines = [
+        "Content lint: "
+        f"OK={summary['OK']} WARNING={summary['WARNING']} "
+        f"VIOLATION={summary['VIOLATION']} ERROR={summary['ERROR']}"
+    ]
+    lines.extend(f"- {item['scope']}: {item['severity']}: {item['message']}" for item in payload["findings"])
+    lines.append("")
+    lines.append(f"exit_code: {payload['exit_code']}")
+    return "\n".join(lines)
+
+
+def main(argv=None, today=None):
+    parser = argparse.ArgumentParser(description="Lint role-scoped instruction content.")
+    parser.add_argument("--config", help="role-matrix YAML config path")
+    parser.add_argument("--as-of-max-days", type=nonnegative_int, default=90, help="maximum as-of age in days")
+    parser.add_argument("--byte-cap", type=nonnegative_int, help="maximum bytes per input file")
+    parser.add_argument("--total-byte-cap", type=nonnegative_int, help="maximum bytes across all input files")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument("files", nargs="+", help="files to lint")
+    args = parser.parse_args(argv)
+
+    try:
+        config = load_config(args.config)
+    except ContentLintError as exc:
+        payload = result([finding("config", "ERROR", str(exc))])
+    else:
+        payload = result(
+            lint_files(
+                args.files,
+                config,
+                args.as_of_max_days,
+                byte_cap=args.byte_cap,
+                total_byte_cap=args.total_byte_cap,
+                today=today,
+            )
+        )
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(render_human(payload))
+    return payload["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

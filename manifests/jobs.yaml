@@ -1,0 +1,135 @@
+# This registry is the watchdog's input.
+# Removing a job here removes it from monitoring.
+# Per closeout policy policies/closeout-rollover.md §4, a completed/retired
+# job must be removed here as part of closeout.
+#
+# This file ships as a worked example. Replace hosts/owners/jobs with your
+# own fleet: `host` must be one of the watchdog's ALLOWED_HOSTS and `owner`
+# one of ALLOWED_OWNERS (scripts/watchdog) — adjust those sets to your family.
+# In this example: `laptop` = the primary agent's machine, `desktop` = a
+# shared always-on machine whose heartbeats are pulled over ssh, `server` =
+# a remote server running server-side agents.
+
+jobs:
+  - id: mem-sync-nightly
+    desc: "Nightly personal memory sync"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: mem-sync-nightly.json
+    alert: [stderr, notify]
+  - id: watchdog-laptop
+    desc: "Common job watchdog (laptop)"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: watchdog-laptop.json
+    alert: [stderr, notify]
+    note: "watchdog's own heartbeat is monitored by the NEXT watchdog run; see docs/jobs-framework.md"
+  - id: watchdog-desktop
+    desc: "Common job watchdog (desktop)"
+    host: desktop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: watchdog-desktop.json
+    alert: [stderr, notify]
+    note: "watchdog's own heartbeat is monitored by the NEXT watchdog run; see docs/jobs-framework.md"
+  - id: watchdog-server
+    desc: "Common job watchdog (server)"
+    host: server
+    owner: agent-b
+    period_hours: 24
+    heartbeat: watchdog-server.json
+    alert: [stderr, notify]
+    note: "self-heartbeat is monitored by the NEXT watchdog run; first run after deploy alerts missing once, then self-heals"
+  - id: personal-hot-lint
+    desc: "Personal hot cache lint"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: personal-hot-lint.json
+    alert: [stderr, notify]
+  - id: vault-lint-light
+    desc: "Light vault hygiene lint"
+    host: server
+    owner: agent-b
+    period_hours: 168
+    heartbeat: vault-lint-light.json
+    alert: [stderr, inbox]
+  - id: vault-lint-deep
+    desc: "Deep vault hygiene lint"
+    host: server
+    owner: agent-b
+    period_hours: 720
+    heartbeat: vault-lint-deep.json
+    alert: [stderr, inbox]
+  - id: meili-ingest-family-vault
+    desc: "Family vault Meilisearch ingest"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: meili-ingest-family-vault.json
+    alert: [stderr, notify]
+  - id: meili-ingest-family-hot
+    desc: "Family hot Meilisearch ingest"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: meili-ingest-family-hot.json
+    alert: [stderr, notify]
+  - id: meili-drift-check
+    desc: "Weekly Meilisearch fail-closed + manifest drift check (family endpoint)"
+    host: server
+    owner: agent-b
+    period_hours: 192
+    heartbeat: meili-drift-check.json
+    alert: [stderr, notify, inbox]
+    note: "scripts/meili-drift-check on the server (cron Mon); the admin key never leaves the server; picked up by the daily watchdog-server run"
+  - id: hot-inbox-reader
+    desc: "Wake the server-side agent when new hot-inbox events arrive (ledger scan, one session per event)"
+    host: server
+    owner: agent-b
+    period_hours: 1
+    heartbeat: hot-inbox-reader.json
+    alert: [stderr, notify]
+    note: "scripts/hot-inbox-reader on the server, cron */30 via run-with-heartbeat; no-news ticks are free (no agent spawn); processed-event ledger (not a watermark) so sync late arrivals are still seen; per-event dispatch with retry + quarantine after 3 attempts. Alert route deliberately excludes inbox: the reader consuming the inbox must not spam it with its own failures"
+  - id: family-hot-generate
+    desc: "Family hot generator"
+    host: server
+    owner: agent-b
+    period_hours: 0.25
+    heartbeat: family-hot-generate.json
+    alert: [inbox]
+    note: "heartbeat JSON is written by the generator itself"
+  - id: weekly-memory-lint
+    desc: "Weekly memory guard: injection-budget-check + overlap-lint + injection-lint --all"
+    host: laptop
+    owner: agent-a
+    period_hours: 192
+    heartbeat: weekly-memory-lint.json
+    alert: [stderr, notify]
+    note: "192h = weekly + 1-day slack for laptop sleep catch-up"
+  - id: agent-c-distill
+    desc: "Agent C nightly distillation (growth-loop distill, server cron)"
+    host: server
+    owner: agent-c
+    period_hours: 30
+    heartbeat: agent-c-distill.json
+    alert: [stderr, notify]
+    note: "cron line wrapped with scripts/run-with-heartbeat — distill body unchanged, success = distill exit 0 (period 30h = daily + slack)"
+  - id: workspace-backup-nightly
+    desc: "Agent workspace nightly backup (desktop launchd A/B/C)"
+    host: desktop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: workspace-backup.json
+    alert: [stderr, notify, inbox]
+    note: "heartbeat written by the backup script on the desktop and ssh-pulled to the laptop by the backup-dashboard wrapper every 30 min plus the daily watchdog wrapper. Pull is copy-only (scp *.json, no delete propagation): a heartbeat file removed on the desktop leaves a stale laptop copy, and the period_hours staleness check is the final guard that surfaces it"
+  - id: backup-dashboard
+    desc: "Family backup dashboard HTML generator (30min launchd)"
+    host: laptop
+    owner: agent-a
+    period_hours: 1
+    heartbeat: backup-dashboard.json
+    alert: [stderr]
+    note: "30min interval, wrapped with run-with-heartbeat; output ~/.claude/state/dashboard/index.html"

@@ -1,0 +1,22 @@
+#!/bin/sh
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$repo_root" ]; then
+  echo "pre-commit: cannot determine git repository root; blocking commit." >&2
+  exit 1
+fi
+
+"$repo_root/scripts/secret-scan" --staged
+status=$?
+
+if [ "$status" -eq 0 ]; then
+  exit 0
+fi
+
+if [ "$status" -eq 2 ]; then
+  echo "pre-commit: secret-scan found secret-like staged content; commit blocked." >&2
+  exit 1
+fi
+
+echo "pre-commit: secret-scan errored; commit blocked as a fail-closed safety default." >&2
+exit 1

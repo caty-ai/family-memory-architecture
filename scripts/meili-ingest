@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""Manifest-gated Meilisearch ingest for family-vault and family-hot."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+BATCH_SIZE = 200
+# Byte cap per batch: uncapped 200-doc batches (up to ~10MB with 50k-char docs)
+# exceed the upload window over Tailscale to the family endpoint.
+BATCH_BYTES_CAP = 2_000_000
+HTTP_TIMEOUT_SECONDS = 300
+MEILI_ID_MAX_BYTES = 500
+TASK_POLL_TIMEOUT_SECONDS = 180.0
+TASK_POLL_INITIAL_INTERVAL_SECONDS = 0.2
+TASK_POLL_MAX_INTERVAL_SECONDS = 2.0
+TASK_POLL_BACKOFF = 1.7
+DEFAULT_VAULT_ROOT = "~/family-vault"
+INGEST_SCRIPT = "scripts/meili-ingest"
+INGEST_BY = "agent-a/meili-ingest"
+LOCAL_DEV_URL = "http://localhost:7700"
+
+MEILI_DOC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+SAFE_UID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+GENERATED_MARKER = "<!-- GENERATED-FILE: family-hot.md; DO NOT EDIT BY HAND -->"
+META_RE = re.compile(
+    r"^<!-- generator: .*; sources_sha256: [0-9a-f]{64}; body_sha256: ([0-9a-f]{64}) -->$"
+)
+SIZE_CAP_BYTES = 2048
+HOT_ITEM_RE = re.compile(r"^- \[class:(\d+) id:([^\]\s]+)\]\s*(.*)$")
+HOT_TRAILING_FIELDS = {"ptr": "ptr", "o": "owner", "p": "priority", "at": "at"}
+
+
+class ManifestError(Exception):
+    """Raised when the constrained manifest cannot be parsed."""
+
+
+class PolicyError(Exception):
+    """Raised for fail-closed refusals."""
+
+
+class IngestRuntimeError(Exception):
+    """Raised for runtime failures."""
+
+
+class HTTPStatusError(IngestRuntimeError):
+    def __init__(self, code: int, body: str):
+        super().__init__(f"http {code}: {body[:200]}")
+        self.code = code
+        self.body = body
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def expand_path(path_text: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def strip_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
+def parse_scalar(value: str, line_number: int):
+    value = value.strip()
+    if value == "":
+        return None
+    if value == "null":
+        return None
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        if len(value) < 2 or value[-1] != quote:
+            raise ManifestError(f"line {line_number}: unterminated quoted string")
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        body = value[1:-1].strip()
+        if not body:
+            return []
+        items = []
+        current = []
+        in_single = False
+        in_double = False
+        for char in body:
+            if char == "'" and not in_double:
+                in_single = not in_single
+            elif char == '"' and not in_single:
+                in_double = not in_double
+            if char == "," and not in_single and not in_double:
+                items.append(parse_scalar("".join(current).strip(), line_number))
+                current = []
+            else:
+                current.append(char)
+        items.append(parse_scalar("".join(current).strip(), line_number))
+        return items
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    return value
+
+
+def parse_key_value(text: str, line_number: int):
+    if ":" not in text:
+        raise ManifestError(f"line {line_number}: expected key: value")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        raise ManifestError(f"line {line_number}: invalid key {key!r}")
+    return key, value
+
+
+def parse_manifest(path: Path) -> dict:
+    try:
+        raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise ManifestError(f"cannot read manifest {path}: {exc}") from exc
+
+    data = {"endpoints": {}, "keys": {"env_conventions": {}}, "indexes": []}
+    section = None
+    endpoint_name = None
+    current_index = None
+    current_subsection = None
+    in_env_conventions = False
+
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        if "\t" in raw_line:
+            raise ManifestError(f"line {line_number}: tabs are not allowed")
+        line = strip_comment(raw_line)
+        if not line.strip():
+            continue
+
+        if not line.startswith(" "):
+            key, value = parse_key_value(line, line_number)
+            section = key if value.strip() == "" and key in {"endpoints", "keys", "indexes"} else None
+            endpoint_name = None
+            current_index = None
+            current_subsection = None
+            in_env_conventions = False
+            if value.strip():
+                data[key] = parse_scalar(value, line_number)
+            elif key not in data:
+                data[key] = {}
+            continue
+
+        if section == "endpoints":
+            if line.startswith("  ") and not line.startswith("    "):
+                key, value = parse_key_value(line[2:], line_number)
+                endpoint_name = key
+                if value.strip():
+                    raise ManifestError(f"line {line_number}: endpoint must be a mapping")
+                data["endpoints"][endpoint_name] = {}
+                continue
+            if line.startswith("    ") and endpoint_name:
+                key, value = parse_key_value(line[4:], line_number)
+                data["endpoints"][endpoint_name][key] = parse_scalar(value, line_number)
+                continue
+
+        if section == "keys":
+            if line.startswith("  env_conventions:"):
+                in_env_conventions = True
+                continue
+            if in_env_conventions and line.startswith("    ") and not line.startswith("      "):
+                key, value = parse_key_value(line[4:], line_number)
+                if value.strip():
+                    data["keys"]["env_conventions"][key] = parse_scalar(value, line_number)
+                continue
+            if line.startswith("  ") and not line.startswith("    "):
+                in_env_conventions = False
+                continue
+            continue
+
+        if section == "indexes":
+            if line.startswith("  - "):
+                current_index = {}
+                data["indexes"].append(current_index)
+                current_subsection = None
+                key, value = parse_key_value(line[4:], line_number)
+                current_index[key] = parse_scalar(value, line_number)
+                continue
+            if line.startswith("    ") and current_index is not None and not line.startswith("      "):
+                key, value = parse_key_value(line[4:], line_number)
+                if value.strip():
+                    current_index[key] = parse_scalar(value, line_number)
+                    current_subsection = None
+                else:
+                    current_index[key] = {}
+                    current_subsection = key
+                continue
+            if line.startswith("      ") and current_index is not None and current_subsection:
+                key, value = parse_key_value(line[6:], line_number)
+                current_index[current_subsection][key] = parse_scalar(value, line_number)
+                continue
+
+        if section is None:
+            continue
+
+        raise ManifestError(f"line {line_number}: unsupported manifest shape")
+
+    return data
+
+
+def find_index(manifest: dict, uid: str) -> dict | None:
+    for index in manifest.get("indexes", []):
+        if index.get("uid") == uid:
+            return index
+    return None
+
+
+def require_ingestable(manifest: dict, uid: str) -> dict:
+    index = find_index(manifest, uid)
+    if index is None:
+        raise PolicyError(f"refusing {uid}: uid is not present in manifest")
+    status = index.get("status")
+    if status != "active":
+        raise PolicyError(f"refusing {uid}: manifest status is {status!r}, not 'active'")
+    ingest = index.get("ingest")
+    script = ingest.get("script") if isinstance(ingest, dict) else None
+    if script != INGEST_SCRIPT:
+        raise PolicyError(f"refusing {uid}: manifest ingest.script is {script!r}, not {INGEST_SCRIPT!r}")
+    if uid not in {"family-vault", "family-hot"}:
+        raise PolicyError(f"refusing {uid}: this ingest CLI only handles family-vault and family-hot")
+    return index
+
+
+def family_write_key_env(uid: str) -> str:
+    return "FAMILY_MEILI_WRITE_KEY_" + uid.upper().replace("-", "_")
+
+
+def resolve_endpoint(manifest: dict, uid: str, endpoint: str) -> tuple[str, str | None]:
+    if endpoint == "family":
+        url = os.environ.get("FAMILY_MEILI_URL") or manifest.get("endpoints", {}).get("family", {}).get("url")
+        key_name = family_write_key_env(uid)
+        key = os.environ.get(key_name, "")
+        if not key:
+            raise PolicyError(f"refusing {uid}: missing required environment variable {key_name}")
+        if not url:
+            raise PolicyError("refusing family endpoint: manifest endpoints.family.url is missing")
+        return str(url).rstrip("/"), key
+    if endpoint == "local-dev":
+        url = manifest.get("endpoints", {}).get("local-dev", {}).get("url") or LOCAL_DEV_URL
+        return str(url).rstrip("/"), os.environ.get("MEILI_LOCAL_KEY") or None
+    raise PolicyError(f"unsupported endpoint {endpoint!r}")
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}, text
+    fm_raw = text[4:end]
+    body = text[end + 5 :]
+    meta = {}
+    for line in fm_raw.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            meta[key] = [item.strip().strip('"').strip("'") for item in value[1:-1].split(",") if item.strip()]
+        else:
+            meta[key] = value.strip('"').strip("'")
+    return meta, body
+
+
+def extract_title(body: str, fallback: str) -> str:
+    for line in body.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return fallback
+
+
+def extract_tags(meta: dict, body: str) -> list[str]:
+    tags = []
+    tag_meta = meta.get("tags")
+    if isinstance(tag_meta, list):
+        tags.extend(str(tag) for tag in tag_meta)
+    elif isinstance(tag_meta, str):
+        tags.extend(tag.strip() for tag in tag_meta.split(",") if tag.strip())
+    for match in re.finditer(r"(?<!\w)#([A-Za-z0-9_\-/]+)", body):
+        tags.append(match.group(1))
+    return sorted(set(tags))
+
+
+def path_to_id(rel_path: str) -> str:
+    sanitized = rel_path.replace("/", "_").replace(" ", "-").replace(".", "_")
+    current_id = "".join(char if char.isalnum() or char in "_-" else "-" for char in sanitized)
+    if MEILI_DOC_ID_RE.fullmatch(current_id) and len(current_id.encode("utf-8")) <= MEILI_ID_MAX_BYTES:
+        return current_id
+
+    suffix = "-" + hashlib.sha1(rel_path.encode("utf-8")).hexdigest()[:10]
+    valid_id = re.sub(r"[^A-Za-z0-9_-]+", "-", current_id)
+    max_base_bytes = MEILI_ID_MAX_BYTES - len(suffix)
+    if len((valid_id + suffix).encode("utf-8")) > MEILI_ID_MAX_BYTES:
+        valid_id = valid_id.encode("utf-8")[:max_base_bytes].decode("ascii", errors="ignore")
+    return valid_id + suffix
+
+
+def add_attribution(docs: list[dict], ingest_at: str) -> list[dict]:
+    for doc in docs:
+        doc["_ingest_by"] = INGEST_BY
+        doc["_ingest_at"] = ingest_at
+    return docs
+
+
+def build_vault_docs(vault_root: Path, ingest_at: str, limit: int | None = None) -> list[dict]:
+    if not vault_root.is_dir():
+        raise IngestRuntimeError(f"vault root not found: {vault_root}")
+
+    docs = []
+    doc_ids = {}
+    for md_path in sorted(vault_root.rglob("*.md")):
+        rel = md_path.relative_to(vault_root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="replace")
+            stat = md_path.stat()
+        except OSError as exc:
+            raise IngestRuntimeError(f"cannot read vault file {rel}: {exc}") from exc
+
+        rel_path = str(rel)
+        doc_id = path_to_id(rel_path)
+        previous_rel_path = doc_ids.get(doc_id)
+        if previous_rel_path is not None:
+            raise IngestRuntimeError(f"doc id collision: {rel_path} vs {previous_rel_path} -> {doc_id}")
+        doc_ids[doc_id] = rel_path
+        directory = rel_path.split("/", 1)[0] if "/" in rel_path else ""
+        meta, body = parse_frontmatter(text)
+        modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
+        docs.append(
+            {
+                "id": doc_id,
+                "path": rel_path,
+                "directory": directory,
+                "title": extract_title(body, md_path.stem),
+                "tags": extract_tags(meta, body),
+                "modified": modified.isoformat().replace("+00:00", "Z"),
+                "content": body[:50000],
+            }
+        )
+        if limit is not None and len(docs) >= limit:
+            break
+    return add_attribution(docs, ingest_at)
+
+
+def compute_hot_body_sha256(raw_bytes: bytes) -> str:
+    lines = raw_bytes.splitlines(keepends=True)
+    body_bytes = b"".join(lines[:1] + lines[2:])
+    return hashlib.sha256(body_bytes).hexdigest()
+
+
+def check_hot_integrity(path: Path) -> tuple[bytes, str | None]:
+    try:
+        if path.stat().st_size > SIZE_CAP_BYTES:
+            return b"", "size-exceeds-2048-bytes"
+        raw_bytes = path.read_bytes()
+    except OSError:
+        return b"", "read-error"
+
+    if len(raw_bytes) > SIZE_CAP_BYTES:
+        return raw_bytes, "size-exceeds-2048-bytes"
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw_bytes, "malformed-marker"
+
+    lines = text.splitlines()
+    if not lines or lines[0] != GENERATED_MARKER:
+        return raw_bytes, "missing-marker"
+    if len(lines) < 2:
+        return raw_bytes, "malformed-meta-line"
+    match = META_RE.fullmatch(lines[1])
+    if not match:
+        return raw_bytes, "malformed-meta-line"
+    if compute_hot_body_sha256(raw_bytes).lower() != match.group(1).lower():
+        return raw_bytes, "body-sha256-mismatch"
+    return raw_bytes, None
+
+
+def parse_trailing_hot_fields(text: str) -> dict:
+    if " | " not in text:
+        return {}
+    candidate = text.rsplit(" | ", 1)[1].strip()
+    fields = {}
+    position = 0
+    pattern = re.compile(r"(ptr|o|p|at):\s*([^;]+)")
+    while position < len(candidate):
+        if position:
+            separator = re.match(r";\s*", candidate[position:])
+            if not separator:
+                return {}
+            position += separator.end()
+        match = pattern.match(candidate, position)
+        if not match:
+            return {}
+        fields[HOT_TRAILING_FIELDS[match.group(1)]] = match.group(2).strip()
+        position = match.end()
+    return fields
+
+
+def build_hot_docs(vault_root: Path, ingest_at: str, limit: int | None = None) -> list[dict]:
+    hot_path = vault_root / "00_index" / "family-hot.md"
+    raw_bytes, failure_reason = check_hot_integrity(hot_path)
+    if failure_reason:
+        if failure_reason == "read-error":
+            raise IngestRuntimeError(f"cannot read family-hot.md: {hot_path}")
+        raise PolicyError(f"refusing family-hot: invalid family-hot.md ({failure_reason})")
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PolicyError("refusing family-hot: invalid family-hot.md (malformed-marker)") from exc
+
+    docs = []
+    for line in text.splitlines():
+        match = HOT_ITEM_RE.match(line)
+        if not match:
+            continue
+        class_num = int(match.group(1))
+        item_id = match.group(2)
+        if item_id == "generator-heartbeat":
+            continue
+        item_text = match.group(3)
+        doc = {"id": item_id, "class": class_num, "text": item_text}
+        doc.update(parse_trailing_hot_fields(item_text))
+        docs.append(doc)
+        if limit is not None and len(docs) >= limit:
+            break
+    return add_attribution(docs, ingest_at)
+
+
+def request_json(base_url: str, method: str, path: str, key: str | None, payload=None):
+    url = base_url.rstrip("/") + path
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise HTTPStatusError(exc.code, body) from exc
+    except urllib.error.URLError as exc:
+        raise IngestRuntimeError(f"network error: {exc.reason}") from exc
+    except OSError as exc:
+        raise IngestRuntimeError(f"network error: {exc}") from exc
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError:
+        return raw.decode("utf-8", errors="replace")
+
+
+def ensure_local_index(base_url: str, uid: str, key: str | None, schema: dict) -> None:
+    try:
+        request_json(base_url, "GET", f"/indexes/{uid}", key)
+        return
+    except HTTPStatusError as exc:
+        if exc.code != 404:
+            raise
+    request_json(base_url, "POST", "/indexes", key, {"uid": uid, "primaryKey": schema.get("primaryKey", "id")})
+    settings = {}
+    if isinstance(schema.get("searchable"), list):
+        settings["searchableAttributes"] = schema["searchable"]
+    if isinstance(schema.get("filterable"), list):
+        settings["filterableAttributes"] = schema["filterable"]
+    if settings:
+        request_json(base_url, "PATCH", f"/indexes/{uid}/settings", key, settings)
+
+
+def extract_task_uid(response) -> str:
+    if not isinstance(response, dict) or "taskUid" not in response:
+        raise IngestRuntimeError("missing taskUid in Meilisearch task response")
+    return str(response["taskUid"])
+
+
+def task_error_text(task) -> str:
+    error = task.get("error") if isinstance(task, dict) else None
+    if isinstance(error, dict):
+        text = error.get("message") or json.dumps(error, ensure_ascii=False, sort_keys=True)
+    elif error is not None:
+        text = str(error)
+    elif isinstance(task, dict):
+        text = str(task.get("status") or "failed")
+    else:
+        text = str(task)
+    return text[:200]
+
+
+def poll_tasks(base_url: str, key: str | None, task_uids: list[str]) -> None:
+    terminal = {"succeeded", "failed", "canceled"}
+    pending = set(task_uids)
+    failures = []
+    deadline = time.monotonic() + TASK_POLL_TIMEOUT_SECONDS
+    interval = TASK_POLL_INITIAL_INTERVAL_SECONDS
+
+    while pending:
+        if time.monotonic() >= deadline:
+            raise IngestRuntimeError("tasks not terminal within 180s")
+        for task_uid in list(pending):
+            task = request_json(base_url, "GET", f"/tasks/{task_uid}", key)
+            status = task.get("status") if isinstance(task, dict) else None
+            if status not in terminal:
+                continue
+            pending.remove(task_uid)
+            if status != "succeeded":
+                failures.append((task_uid, task_error_text(task)))
+        if pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise IngestRuntimeError("tasks not terminal within 180s")
+            time.sleep(min(interval, remaining))
+            interval = min(TASK_POLL_MAX_INTERVAL_SECONDS, interval * TASK_POLL_BACKOFF)
+
+    if failures:
+        details = "; ".join(f"uid={task_uid} error={error}" for task_uid, error in failures)
+        raise IngestRuntimeError(f"tasks failed: {details}")
+
+
+def iter_batches(docs: list[dict]):
+    batch: list[dict] = []
+    batch_bytes = 2  # surrounding []
+    for doc in docs:
+        doc_bytes = len(json.dumps(doc, ensure_ascii=False).encode("utf-8")) + 1
+        if batch and (len(batch) >= BATCH_SIZE or batch_bytes + doc_bytes > BATCH_BYTES_CAP):
+            yield batch
+            batch = []
+            batch_bytes = 2
+        batch.append(doc)
+        batch_bytes += doc_bytes
+    if batch:
+        yield batch
+
+
+def post_batches(base_url: str, uid: str, key: str | None, docs: list[dict]) -> list[str]:
+    task_uids = []
+    for batch in iter_batches(docs):
+        response = request_json(base_url, "POST", f"/indexes/{uid}/documents", key, batch)
+        task_uids.append(extract_task_uid(response))
+    return task_uids
+
+
+def heartbeat_path(uid: str) -> Path:
+    base = os.environ.get("FMA_HEARTBEAT_DIR") or "~/.claude/state/heartbeats"
+    safe_uid = uid if SAFE_UID_RE.fullmatch(uid) else "_invalid-uid"
+    return expand_path(base) / f"meili-ingest-{safe_uid}.json"
+
+
+def write_heartbeat(uid: str, endpoint: str, status: str, reason: str | None, docs: int, started: float) -> None:
+    path = heartbeat_path(uid)
+    fail_count = 0
+    try:
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            fail_count = int(previous.get("fail_count", 0))
+    except (OSError, ValueError, TypeError):
+        fail_count = 0
+    fail_count = 0 if status == "ok" else fail_count + 1
+    payload = {
+        "job": f"meili-ingest-{uid}",
+        "last_run": utc_now_iso(),
+        "status": status,
+        "fail_count": fail_count,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "docs": docs,
+        "endpoint": endpoint,
+    }
+    if status == "fail":
+        payload["reason"] = reason or "failed"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"warning: heartbeat write failed: {exc}", file=sys.stderr)
+
+
+def default_manifest_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "manifests" / "meilisearch-indexes.yaml"
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Manifest-gated Meilisearch ingest.")
+    parser.add_argument("index_uid")
+    parser.add_argument("--endpoint", choices=("family", "local-dev"), default="local-dev")
+    parser.add_argument("--manifest", default=str(default_manifest_path()))
+    parser.add_argument("--vault-root", default=DEFAULT_VAULT_ROOT)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int)
+    return parser.parse_args(argv)
+
+
+def run(args) -> tuple[int, int, str | None]:
+    try:
+        manifest = parse_manifest(Path(args.manifest))
+    except ManifestError as exc:
+        raise PolicyError(f"refusing {args.index_uid}: {exc}") from exc
+    index = require_ingestable(manifest, args.index_uid)
+    base_url, key = resolve_endpoint(manifest, args.index_uid, args.endpoint)
+    ingest_at = utc_now_iso()
+    vault_root = expand_path(args.vault_root)
+
+    if args.index_uid == "family-vault":
+        docs = build_vault_docs(vault_root, ingest_at, args.limit)
+    else:
+        docs = build_hot_docs(vault_root, ingest_at, args.limit)
+    args.docs_count = len(docs)
+
+    if args.dry_run:
+        sample = docs[0]["id"] if docs else ""
+        print(f"dry-run index={args.index_uid} docs={len(docs)} sample_id={sample}")
+        return 0, len(docs), None
+
+    if args.endpoint == "local-dev":
+        ensure_local_index(base_url, args.index_uid, key, index.get("schema", {}))
+    task_uids = post_batches(base_url, args.index_uid, key, docs)
+    poll_tasks(base_url, key, task_uids)
+    print(
+        f"ingested index={args.index_uid} docs={len(docs)} "
+        f"endpoint={args.endpoint} tasks={len(task_uids)} all-succeeded"
+    )
+    return 0, len(docs), None
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    started = time.monotonic()
+    docs = 0
+    reason = None
+    status = "fail"
+    exit_code = 1
+    try:
+        exit_code, docs, reason = run(args)
+        status = "ok"
+        return exit_code
+    except PolicyError as exc:
+        reason = str(exc)
+        print(reason, file=sys.stderr)
+        exit_code = 2
+        return exit_code
+    except IngestRuntimeError as exc:
+        reason = str(exc)
+        print(reason, file=sys.stderr)
+        exit_code = 1
+        return exit_code
+    except OSError as exc:
+        reason = f"io error: {exc}"
+        print(reason, file=sys.stderr)
+        exit_code = 1
+        return exit_code
+    except Exception as exc:
+        reason = f"runtime error: {exc}"
+        print(reason, file=sys.stderr)
+        exit_code = 1
+        return exit_code
+    finally:
+        write_heartbeat(args.index_uid, args.endpoint, status, reason, getattr(args, "docs_count", docs), started)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

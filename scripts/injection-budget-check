@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Check fixed injection byte budgets for DESIGN v0.3 §C1 / Issue #2.
+
+This is intentionally not a general YAML parser. It accepts only the constrained
+manifest shape documented for Agent A's fixed-injection budget.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+TOP_LEVEL_KEYS = {"version", "agent", "generated_at", "target_total_bytes", "sources"}
+SOURCE_KINDS = {"hand-edited", "generated", "dynamic"}
+
+
+class ManifestError(Exception):
+    """Raised when the manifest is outside the expected constrained schema."""
+
+
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    return 2
+
+
+def strip_comment(line):
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
+def parse_scalar(value, line_number):
+    value = value.strip()
+    if value == "":
+        raise ManifestError(f"line {line_number}: empty scalar value")
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        if len(value) < 2 or value[-1] != quote:
+            raise ManifestError(f"line {line_number}: unterminated quoted string")
+        return value[1:-1]
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    return value
+
+
+def parse_key_value(text, line_number):
+    if ":" not in text:
+        raise ManifestError(f"line {line_number}: expected key: value")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        raise ManifestError(f"line {line_number}: invalid key {key!r}")
+    return key, value
+
+
+def parse_manifest(path):
+    try:
+        raw_lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise ManifestError(f"cannot read manifest {path}: {exc}") from exc
+
+    data = {}
+    sources = None
+    current_source = None
+    in_sources = False
+
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        if "\t" in raw_line:
+            raise ManifestError(f"line {line_number}: tabs are not allowed")
+        line = strip_comment(raw_line)
+        if not line.strip():
+            continue
+
+        if line.startswith("  - "):
+            if not in_sources:
+                raise ManifestError(f"line {line_number}: source item before sources:")
+            if not line.startswith("  - id:"):
+                raise ManifestError(f"line {line_number}: source item must start with '  - id:'")
+            key, value = parse_key_value(line[4:], line_number)
+            if key != "id":
+                raise ManifestError(f"line {line_number}: source item must start with id")
+            current_source = {"id": parse_scalar(value, line_number)}
+            sources.append(current_source)
+            continue
+
+        if line.startswith("    "):
+            if not in_sources or current_source is None:
+                raise ManifestError(f"line {line_number}: source field outside source item")
+            if line.startswith("     "):
+                raise ManifestError(f"line {line_number}: unexpected indentation in source field")
+            key, value = parse_key_value(line[4:], line_number)
+            if key in current_source:
+                raise ManifestError(f"line {line_number}: duplicate source key {key!r}")
+            current_source[key] = parse_scalar(value, line_number)
+            continue
+
+        if line.startswith(" "):
+            raise ManifestError(f"line {line_number}: unexpected indentation")
+
+        key, value = parse_key_value(line, line_number)
+        if key not in TOP_LEVEL_KEYS:
+            raise ManifestError(f"line {line_number}: unrecognized top-level key {key!r}")
+        if key in data:
+            raise ManifestError(f"line {line_number}: duplicate top-level key {key!r}")
+        if key == "sources":
+            if value.strip():
+                raise ManifestError(f"line {line_number}: sources: must not have an inline value")
+            in_sources = True
+            sources = []
+            data["sources"] = sources
+        else:
+            if in_sources:
+                raise ManifestError(f"line {line_number}: top-level key after sources list is not supported")
+            data[key] = parse_scalar(value, line_number)
+
+    if sources is None:
+        raise ManifestError("missing required top-level sources:")
+    if not sources:
+        raise ManifestError("sources: must contain at least one source item")
+    if "target_total_bytes" not in data:
+        raise ManifestError("missing required top-level target_total_bytes")
+    if not isinstance(data["target_total_bytes"], int):
+        raise ManifestError("target_total_bytes must be an integer")
+
+    for index, source in enumerate(sources, 1):
+        label = source.get("id", f"source #{index}")
+        for required in ("id", "kind", "max_bytes"):
+            if required not in source:
+                raise ManifestError(f"{label}: missing required {required}")
+        if not isinstance(source["id"], str) or not source["id"]:
+            raise ManifestError(f"source #{index}: id must be a non-empty string")
+        if source["kind"] not in SOURCE_KINDS:
+            raise ManifestError(f"{source['id']}: unsupported kind {source['kind']!r}")
+        if not isinstance(source["max_bytes"], int):
+            raise ManifestError(f"{source['id']}: max_bytes must be an integer")
+        if source["max_bytes"] < 0:
+            raise ManifestError(f"{source['id']}: max_bytes must be non-negative")
+        if source["kind"] == "dynamic":
+            conflicting_keys = [
+                key
+                for key in ("segment_boundary", "enforced_segment", "max_bytes_enforced_segment")
+                if key in source
+            ]
+            if conflicting_keys:
+                keys_text = ", ".join(conflicting_keys)
+                raise ManifestError(
+                    f"Source {source['id']!r} has kind: dynamic but also declares "
+                    f"{keys_text}; dynamic sources cannot be segmented"
+                )
+        if "segment_boundary" in source:
+            for required in ("enforced_segment", "max_bytes_enforced_segment"):
+                if required not in source:
+                    raise ManifestError(f"{source['id']}: segmented source missing required {required}")
+            if not isinstance(source["segment_boundary"], str) or not source["segment_boundary"]:
+                raise ManifestError(f"{source['id']}: segment_boundary must be a non-empty string")
+            if source["enforced_segment"] != "after":
+                raise ManifestError(
+                    f"{source['id']}: unsupported enforced_segment {source['enforced_segment']!r}"
+                )
+            if not isinstance(source["max_bytes_enforced_segment"], int):
+                raise ManifestError(f"{source['id']}: max_bytes_enforced_segment must be an integer")
+            if source["max_bytes_enforced_segment"] < 0:
+                raise ManifestError(f"{source['id']}: max_bytes_enforced_segment must be non-negative")
+
+    return data
+
+
+def parse_measured(values):
+    measured = {}
+    for item in values or []:
+        if "=" not in item:
+            raise ManifestError(f"--measured value must be ID=BYTES, got {item!r}")
+        source_id, bytes_text = item.split("=", 1)
+        if not source_id:
+            raise ManifestError("--measured source id must not be empty")
+        if source_id in measured:
+            raise ManifestError(f"duplicate --measured value for {source_id!r}")
+        if not re.fullmatch(r"\d+", bytes_text):
+            raise ManifestError(f"--measured bytes for {source_id!r} must be a non-negative integer")
+        measured[source_id] = int(bytes_text)
+    return measured
+
+
+def source_result(source, measured_overrides):
+    source_id = source["id"]
+    kind = source["kind"]
+    cap = source["max_bytes"]
+    segmented = "segment_boundary" in source
+    result = {
+        "id": source_id,
+        "kind": kind,
+        "measured_bytes": None,
+        "cap_bytes": cap,
+        "percent_of_cap": None,
+        "status": "OK",
+        "severity": 0,
+        "message": "",
+    }
+
+    if "path" in source:
+        expanded_path = os.path.expandvars(os.path.expanduser(str(source["path"])))
+        result["path"] = expanded_path
+        if os.path.exists(expanded_path):
+            if segmented:
+                file_bytes = Path(expanded_path).read_bytes()
+                result["measured_bytes"] = len(file_bytes)
+            else:
+                file_bytes = None
+                result["measured_bytes"] = os.path.getsize(expanded_path)
+        elif kind == "dynamic":
+            result["status"] = "WARNING"
+            result["severity"] = 1
+            result["message"] = f"path is missing for dynamic source: {expanded_path}"
+            return result
+        else:
+            result["status"] = "ERROR"
+            result["severity"] = 2
+            result["message"] = f"configured {kind} path is missing: {expanded_path}"
+            return result
+    elif kind == "dynamic":
+        if segmented:
+            raise ManifestError(f"{source_id}: segmented source requires an explicit path")
+        if source_id in measured_overrides:
+            result["measured_bytes"] = measured_overrides[source_id]
+        else:
+            result["status"] = "UNMEASURED"
+            result["severity"] = 1
+            result["measure_hint"] = source.get("measure_hint", "(no measure_hint provided)")
+            result["message"] = result["measure_hint"]
+            return result
+    else:
+        if segmented:
+            raise ManifestError(f"{source_id}: segmented source requires an explicit path")
+        raise ManifestError(f"{source_id}: {kind} source requires an explicit path")
+
+    measured = result["measured_bytes"]
+    result["percent_of_cap"] = measured / cap if cap else None
+    messages = []
+
+    if segmented:
+        boundary = source["segment_boundary"]
+        boundary_bytes = boundary.encode("utf-8")
+        idx = file_bytes.find(boundary_bytes)
+        result["segment_boundary"] = boundary
+        result["segment_boundary_found"] = idx != -1
+        result["segment_after_cap"] = source["max_bytes_enforced_segment"]
+
+        if idx == -1:
+            result["segment_before_bytes"] = None
+            result["segment_after_bytes"] = None
+            result["status"] = "BLOCKING"
+            result["severity"] = 2
+            messages.append(
+                f"{source_id}: segment_boundary {boundary!r} not found in "
+                f"{result['path']} — manifest/file mismatch"
+            )
+        else:
+            segment1_bytes = idx + len(boundary_bytes)
+            segment2_bytes = measured - segment1_bytes
+            result["segment_before_bytes"] = segment1_bytes
+            result["segment_after_bytes"] = segment2_bytes
+            after_cap = source["max_bytes_enforced_segment"]
+            if segment2_bytes > after_cap:
+                over_by = segment2_bytes - after_cap
+                result["status"] = "BLOCKING"
+                result["severity"] = 2
+                messages.append(
+                    f"{source_id}: after segment exceeds max_bytes_enforced_segment by "
+                    f"{over_by} bytes; trim the human-editable segment"
+                )
+
+        if measured > cap:
+            over_by = measured - cap
+            if result["severity"] < 1:
+                result["status"] = "WARNING"
+                result["severity"] = 1
+            messages.append(
+                f"{source_id}: whole file exceeds max_bytes by {over_by} bytes "
+                "(warning only for segmented source)"
+            )
+        result["message"] = "; ".join(messages)
+        return result
+
+    if measured > cap:
+        over_by = measured - cap
+        if source.get("enforcement") == "alert-only" or kind == "dynamic":
+            result["status"] = "WARNING"
+            result["severity"] = 1
+            result["message"] = f"{source_id}: source exceeds max_bytes by {over_by} bytes (warning only)"
+        elif kind == "hand-edited":
+            result["status"] = "BLOCKING"
+            result["severity"] = 2
+            result["message"] = f"{source_id}: trim the file by {over_by} bytes to meet max_bytes"
+        elif kind == "generated":
+            result["status"] = "ERROR"
+            result["severity"] = 2
+            result["message"] = f"{source_id}: generator bug; cap must be enforced at generation side, not here"
+
+    return result
+
+
+def evaluate(manifest, measured_overrides):
+    results = [source_result(source, measured_overrides) for source in manifest["sources"]]
+    total = sum(item["measured_bytes"] for item in results if item["measured_bytes"] is not None)
+    unmeasured_count = sum(1 for item in results if item["measured_bytes"] is None)
+    target = manifest["target_total_bytes"]
+    total_delta = total - target
+    total_warning = total > target
+    severity = max([item["severity"] for item in results] + ([1] if total_warning else [0]))
+
+    if severity == 0:
+        verdict = "OK"
+    elif severity == 1:
+        verdict = "WARNING"
+    elif any(item["status"] == "BLOCKING" for item in results):
+        verdict = "BLOCKING"
+    else:
+        verdict = "ERROR"
+
+    return {
+        "sources": results,
+        "summary": {
+            "total_measured_bytes": total,
+            "target_total_bytes": target,
+            "over_under_bytes": total_delta,
+            "unmeasured_sources": unmeasured_count,
+            "total_over_target": total_warning,
+            "verdict": verdict,
+            "exit_code": severity,
+        },
+    }
+
+
+def render_human(evaluation):
+    rows = []
+    for item in evaluation["sources"]:
+        measured = "UNMEASURED" if item["measured_bytes"] is None else str(item["measured_bytes"])
+        percent = "-" if item["percent_of_cap"] is None else f"{item['percent_of_cap'] * 100:.1f}%"
+        if "segment_boundary_found" not in item:
+            segments = "-"
+        elif item["segment_boundary_found"]:
+            segments = f"before={item['segment_before_bytes']} after={item['segment_after_bytes']}"
+        else:
+            segments = "boundary=not-found"
+        rows.append([item["id"], item["kind"], measured, str(item["cap_bytes"]), segments, percent, item["status"]])
+
+    headers = ["id", "kind", "measured", "cap", "segment sizes", "% of cap", "status"]
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    def fmt(row):
+        return "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
+
+    lines = [fmt(headers), fmt(["-" * width for width in widths])]
+    lines.extend(fmt(row) for row in rows)
+
+    notes = [item for item in evaluation["sources"] if item["message"]]
+    if notes:
+        lines.append("")
+        lines.append("Notes:")
+        for item in notes:
+            lines.append(f"- {item['id']}: {item['message']}")
+
+    summary = evaluation["summary"]
+    relation = "over" if summary["over_under_bytes"] > 0 else "under"
+    lines.append("")
+    lines.append(
+        "Summary: total measured bytes "
+        f"{summary['total_measured_bytes']} / target_total_bytes {summary['target_total_bytes']} "
+        f"({abs(summary['over_under_bytes'])} bytes {relation}); "
+        f"unmeasured sources {summary['unmeasured_sources']}; "
+        f"verdict {summary['verdict']} exit {summary['exit_code']}"
+    )
+    if summary["total_over_target"]:
+        lines.append("- total measured bytes exceed target_total_bytes; unmeasured sources are excluded from the sum")
+    elif summary["unmeasured_sources"]:
+        lines.append("- unmeasured sources are excluded from the total")
+    return "\n".join(lines)
+
+
+def default_manifest_path():
+    return Path(__file__).resolve().parent.parent / "manifests" / "fixed-injection.yaml"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Check fixed injection byte budgets.")
+    parser.add_argument("--manifest", default=str(default_manifest_path()), help="manifest path")
+    parser.add_argument("--measured", action="append", default=[], help="caller-supplied source size as ID=BYTES")
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of a human table")
+    args = parser.parse_args(argv)
+
+    try:
+        measured_overrides = parse_measured(args.measured)
+        manifest = parse_manifest(args.manifest)
+        unknown_measured_ids = sorted(set(measured_overrides) - {source["id"] for source in manifest["sources"]})
+        if unknown_measured_ids:
+            print(
+                "Warning: --measured specified unknown source id(s): "
+                + ", ".join(unknown_measured_ids),
+                file=sys.stderr,
+            )
+        evaluation = evaluate(manifest, measured_overrides)
+    except ManifestError as exc:
+        return fail(str(exc))
+
+    if args.json:
+        print(json.dumps(evaluation, ensure_ascii=False, sort_keys=True))
+    else:
+        print(render_human(evaluation))
+    return evaluation["summary"]["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Suggest memory-save candidates from a Claude Code Stop-hook transcript."""
+
+import json
+import importlib.machinery
+import importlib.util
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+
+TAIL_BYTES = 200_000
+MAX_LINES = 200
+CANDIDATE_RE = re.compile(r"決定|方針|今後は|確定|教訓|実測|判明")
+DECISION_RE = re.compile(r"決定|確定")
+LEARNING_RE = re.compile(r"教訓|実測|判明")
+POLICY_RE = re.compile(r"方針|今後は")
+
+
+def load_secret_scan():
+    script = Path(os.environ.get("FMA_SECRET_SCAN_PATH", Path(__file__).resolve().parent / "secret-scan"))
+    loader = importlib.machinery.SourceFileLoader("secret_scan_for_save_candidate", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.line_findings
+
+
+def collect_text(value):
+    texts = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "text" and isinstance(item, str):
+                texts.append(item)
+            else:
+                texts.extend(collect_text(item))
+    elif isinstance(value, list):
+        for item in value:
+            texts.extend(collect_text(item))
+    return texts
+
+
+def layer_hint(chunk):
+    if DECISION_RE.search(chunk):
+        return "family-vault 30_decisions"
+    if LEARNING_RE.search(chunk):
+        return "personal-wiki"
+    if POLICY_RE.search(chunk):
+        return "MEMORY.md feedback"
+    return "personal-wiki"
+
+
+def load_write_guard():
+    """Load scripts/write-guard's route() (spec §4: candidates go through the
+    real router, not a local heuristic). Raises when unavailable — the caller
+    catches, warns, and falls back to layer_hint so the Stop hook never breaks
+    a session. write-guard is import-safe: CLI behind __main__, route() pure
+    (decisions.jsonl is written only on the CLI path — measured)."""
+    script = Path(
+        os.environ.get("FMA_WRITE_GUARD_PATH", Path(__file__).resolve().parent / "write-guard")
+    )
+    loader = importlib.machinery.SourceFileLoader("write_guard_for_save_candidate", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.route
+
+
+def routed_hint(route, chunk):
+    """Return the suggestion text for a candidate, or None to suppress it.
+
+    Suppression cases (spec §4): route()-refused content (secret defense in
+    depth on top of the pre-filter) and temporary notes (layer "none" =
+    deliberately not worth persisting). "unknown" falls back to the local
+    heuristic rather than suggesting an unusable destination.
+    """
+    try:
+        decision = route(chunk)
+        layer = decision.get("layer")
+        if layer in ("refused", "none"):
+            return None
+        if layer == "unknown":
+            return f"{layer_hint(chunk)}"
+        path_hint = str(decision.get("path_hint") or "")
+        # format_hint may carry a nested spec reference in parens — keep the plain part
+        reason = str(decision.get("format_hint") or "")
+        reason = re.split(r"[（(]", reason)[0][:60].strip()
+        text = f"{layer} {path_hint}".strip()
+        if reason:
+            text += f"（{reason}）"
+        # one-suggestion-per-line contract: route() strings must not smuggle newlines
+        return " ".join(text.split())
+    except Exception:
+        # any surprise from route() (non-dict return included) degrades to the
+        # heuristic — the Stop hook must never break a session end
+        return f"{layer_hint(chunk)}"
+
+
+def read_tail_lines(path):
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        offset = max(0, size - TAIL_BYTES)
+        handle.seek(offset)
+        raw = handle.read()
+    text = raw.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    if offset > 0 and lines:
+        lines = lines[1:]
+    return lines[-MAX_LINES:]
+
+
+def main():
+    try:
+        stdin = sys.stdin.read()
+        if not stdin.strip():
+            return 0
+        try:
+            payload = json.loads(stdin)
+        except json.JSONDecodeError:
+            return 0
+        transcript_path = payload.get("transcript_path") if isinstance(payload, dict) else None
+        if not transcript_path:
+            return 0
+        path = Path(os.path.expanduser(os.path.expandvars(str(transcript_path))))
+        if not path.exists():
+            return 0
+        if not stat.S_ISREG(path.stat().st_mode):
+            return 0
+        try:
+            line_findings = load_secret_scan()
+        except Exception as exc:
+            print(f"save-candidate-suggest: secret scan unavailable: {exc}", file=sys.stderr)
+            return 0
+
+        try:
+            route = load_write_guard()
+        except Exception as exc:
+            print(f"save-candidate-suggest: write-guard unavailable, heuristic hints: {exc}", file=sys.stderr)
+            route = None
+
+        seen = set()
+        suggestions = []
+        for line in read_tail_lines(path):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for text in collect_text(event):
+                for chunk in text.splitlines():
+                    chunk = chunk.strip()
+                    if not chunk or not CANDIDATE_RE.search(chunk):
+                        continue
+                    try:
+                        findings = line_findings(str(path), 1, chunk, [chunk], 0)
+                    except Exception as exc:
+                        print(f"save-candidate-suggest: secret scan failed: {exc}", file=sys.stderr)
+                        return 0
+                    if findings:
+                        continue
+                    excerpt = chunk[:80]
+                    if excerpt in seen:
+                        continue
+                    hint = routed_hint(route, chunk) if route else layer_hint(chunk)
+                    if hint is None:  # refused/temporary — suppress entirely
+                        continue
+                    # mark seen only for emitted suggestions: a suppressed excerpt
+                    # recurring with a different (savable) tail gets reconsidered
+                    seen.add(excerpt)
+                    suggestions.append((excerpt, hint))
+                    if len(suggestions) >= 3:
+                        break
+                if len(suggestions) >= 3:
+                    break
+            if len(suggestions) >= 3:
+                break
+
+        for excerpt, hint in suggestions:
+            print(f'[save候補] "{excerpt}" → {hint}')
+    except Exception as exc:
+        print(f"save-candidate-suggest: {exc}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

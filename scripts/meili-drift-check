@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""Fail-closed and manifest drift checks for Family Meilisearch."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+HTTP_TIMEOUT_SECONDS = 30
+DEFAULT_HEARTBEAT_DIR = "~/.claude/state/heartbeats"
+DEFAULT_STATE_DIR = "~/.claude/state/meili-drift"
+HEARTBEAT_NAME = "meili-drift-check.json"
+STATE_NAME = "meili-drift-state.json"
+ACTIVE_STATUSES = {"active", "active-existing"}
+
+
+class ManifestError(Exception):
+    """Raised when the constrained manifest cannot be parsed."""
+
+
+class PolicyError(Exception):
+    """Raised for fail-closed policy violations."""
+
+
+class DriftRuntimeError(Exception):
+    """Raised when a drift check cannot be completed."""
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def expand_path(path_text: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def strip_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
+def parse_scalar(value: str, line_number: int):
+    value = value.strip()
+    if value == "":
+        return None
+    if value == "null":
+        return None
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        if len(value) < 2 or value[-1] != quote:
+            raise ManifestError(f"line {line_number}: unterminated quoted string")
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        body = value[1:-1].strip()
+        if not body:
+            return []
+        items = []
+        current = []
+        in_single = False
+        in_double = False
+        for char in body:
+            if char == "'" and not in_double:
+                in_single = not in_single
+            elif char == '"' and not in_single:
+                in_double = not in_double
+            if char == "," and not in_single and not in_double:
+                items.append(parse_scalar("".join(current).strip(), line_number))
+                current = []
+            else:
+                current.append(char)
+        items.append(parse_scalar("".join(current).strip(), line_number))
+        return items
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    return value
+
+
+def parse_key_value(text: str, line_number: int):
+    if ":" not in text:
+        raise ManifestError(f"line {line_number}: expected key: value")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        raise ManifestError(f"line {line_number}: invalid key {key!r}")
+    return key, value
+
+
+def parse_manifest(path: Path) -> dict:
+    try:
+        raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise ManifestError(f"cannot read manifest {path}: {exc}") from exc
+
+    data = {"endpoints": {}, "keys": {"env_conventions": {}}, "indexes": []}
+    section = None
+    endpoint_name = None
+    current_index = None
+    current_subsection = None
+    in_env_conventions = False
+
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        if "\t" in raw_line:
+            raise ManifestError(f"line {line_number}: tabs are not allowed")
+        line = strip_comment(raw_line)
+        if not line.strip():
+            continue
+
+        if not line.startswith(" "):
+            key, value = parse_key_value(line, line_number)
+            section = key if value.strip() == "" and key in {"endpoints", "keys", "indexes"} else None
+            endpoint_name = None
+            current_index = None
+            current_subsection = None
+            in_env_conventions = False
+            if value.strip():
+                data[key] = parse_scalar(value, line_number)
+            elif key not in data:
+                data[key] = {}
+            continue
+
+        if section == "endpoints":
+            if line.startswith("  ") and not line.startswith("    "):
+                key, value = parse_key_value(line[2:], line_number)
+                endpoint_name = key
+                if value.strip():
+                    raise ManifestError(f"line {line_number}: endpoint must be a mapping")
+                data["endpoints"][endpoint_name] = {}
+                continue
+            if line.startswith("    ") and endpoint_name:
+                key, value = parse_key_value(line[4:], line_number)
+                data["endpoints"][endpoint_name][key] = parse_scalar(value, line_number)
+                continue
+
+        if section == "keys":
+            if line.startswith("  env_conventions:"):
+                in_env_conventions = True
+                continue
+            if in_env_conventions and line.startswith("    ") and not line.startswith("      "):
+                key, value = parse_key_value(line[4:], line_number)
+                if value.strip():
+                    data["keys"]["env_conventions"][key] = parse_scalar(value, line_number)
+                continue
+            if line.startswith("  ") and not line.startswith("    "):
+                in_env_conventions = False
+                continue
+            continue
+
+        if section == "indexes":
+            if line.startswith("  - "):
+                current_index = {}
+                data["indexes"].append(current_index)
+                current_subsection = None
+                key, value = parse_key_value(line[4:], line_number)
+                current_index[key] = parse_scalar(value, line_number)
+                continue
+            if line.startswith("    ") and current_index is not None and not line.startswith("      "):
+                key, value = parse_key_value(line[4:], line_number)
+                if value.strip():
+                    current_index[key] = parse_scalar(value, line_number)
+                    current_subsection = None
+                else:
+                    current_index[key] = {}
+                    current_subsection = key
+                continue
+            if line.startswith("      ") and current_index is not None and current_subsection:
+                key, value = parse_key_value(line[6:], line_number)
+                current_index[current_subsection][key] = parse_scalar(value, line_number)
+                continue
+
+        if section is None:
+            continue
+
+        raise ManifestError(f"line {line_number}: unsupported manifest shape")
+
+    return data
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    script_dir = Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser(description="Check Family Meilisearch for policy and manifest drift.")
+    parser.add_argument(
+        "--manifest",
+        default=str(script_dir.parent / "manifests" / "meilisearch-indexes.yaml"),
+    )
+    parser.add_argument("--endpoint", choices=("family", "local-dev"), default="family")
+    parser.add_argument("--heartbeat-dir", default=os.environ.get("FMA_HEARTBEAT_DIR") or DEFAULT_HEARTBEAT_DIR)
+    parser.add_argument("--state-dir", default=os.environ.get("FMA_DRIFT_STATE_DIR") or DEFAULT_STATE_DIR)
+    parser.add_argument("--skip-host-checks", action="store_true")
+    return parser.parse_args(argv)
+
+
+def manifest_family_address(manifest: dict) -> tuple[str, int]:
+    raw_url = manifest.get("endpoints", {}).get("family", {}).get("url")
+    if not raw_url:
+        raise PolicyError("manifest endpoints.family.url is missing")
+    parsed = urllib.parse.urlparse(str(raw_url))
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise PolicyError("manifest endpoints.family.url has an invalid port") from exc
+    if not parsed.hostname or port is None:
+        raise PolicyError("manifest endpoints.family.url must include a host and port")
+    return parsed.hostname, port
+
+
+def resolve_endpoint(manifest: dict, endpoint: str) -> tuple[str, str | None]:
+    endpoints = manifest.get("endpoints", {})
+    if endpoint == "family":
+        url = os.environ.get("FAMILY_MEILI_URL") or endpoints.get("family", {}).get("url")
+        if not url:
+            raise PolicyError("family endpoint URL is missing")
+        # The drift check exists to verify the manifest endpoint; an env
+        # override pointing anywhere else would silently redirect every
+        # bearer-keyed request (SSRF / key exfiltration). Pin scheme and
+        # host:port to the manifest before any request is made.
+        expected_ip, expected_port = manifest_family_address(manifest)
+        parsed = urllib.parse.urlparse(str(url))
+        if parsed.scheme not in {"http", "https"}:
+            raise PolicyError(f"family endpoint URL has unsupported scheme {parsed.scheme!r}")
+        if parsed.hostname != expected_ip or parsed.port != expected_port:
+            raise PolicyError(
+                "family endpoint URL does not match manifest endpoints.family.url "
+                f"({expected_ip}:{expected_port})"
+            )
+        key = os.environ.get("FAMILY_MEILI_DRIFT_KEY") or os.environ.get("MEILI_MASTER_KEY")
+        if not key:
+            raise PolicyError("missing FAMILY_MEILI_DRIFT_KEY or MEILI_MASTER_KEY")
+        return str(url).rstrip("/"), key
+    url = str(endpoints.get("local-dev", {}).get("url") or "http://localhost:7700")
+    parsed = urllib.parse.urlparse(url)
+    # local-dev may run keyless, so it must never be able to point at a
+    # remote instance (e.g. a manifest edit aiming it at the family endpoint).
+    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise PolicyError("local-dev endpoint URL must be http on localhost")
+    return url.rstrip("/"), os.environ.get("MEILI_LOCAL_KEY") or None
+
+
+def local_address_and_port(token: str) -> tuple[str, int] | None:
+    if ":" not in token:
+        return None
+    address, port_text = token.rsplit(":", 1)
+    if not port_text.isdigit():
+        return None
+    if address == "::1":
+        address = "[::1]"
+    return address, int(port_text)
+
+
+def check_bind(expected_ip: str, expected_port: int) -> tuple[str, bool, str]:
+    command_error = ""
+    output = ""
+    for command in (("ss", "-H", "-tln"), ("ss", "-tln")):
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError as exc:
+            command_error = str(exc)
+            break
+        if completed.returncode == 0:
+            output = completed.stdout
+            break
+        command_error = completed.stderr.strip() or f"exit {completed.returncode}"
+    else:
+        return "bind-check", False, f"ss failed: {command_error}"
+    if not output and command_error:
+        return "bind-check", False, f"ss failed: {command_error}"
+
+    listeners = []
+    for line in output.splitlines():
+        fields = line.split()
+        if not fields or fields[0] in {"State", "Netid"} or len(fields) < 4:
+            continue
+        parsed = local_address_and_port(fields[3])
+        if parsed and parsed[1] == expected_port:
+            listeners.append(parsed[0])
+    if not listeners:
+        return "bind-check", False, "meilisearch not listening"
+    allowed = {expected_ip, "127.0.0.1", "[::1]"}
+    disallowed = sorted(set(listeners) - allowed)
+    if disallowed:
+        return "bind-check", False, f"disallowed listen address(es): {', '.join(disallowed)}"
+    return "bind-check", True, f"port {expected_port} limited to allowed addresses"
+
+
+def check_tailscale(expected_ip: str) -> tuple[str, bool, str]:
+    try:
+        completed = subprocess.run(("tailscale", "ip", "-4"), capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return "tailscale-check", False, f"tailscale unavailable: {exc}"
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        return "tailscale-check", False, f"tailscale ip -4 failed: {detail}"
+    addresses = {line.strip() for line in completed.stdout.splitlines() if line.strip()}
+    if expected_ip not in addresses:
+        return "tailscale-check", False, f"expected address {expected_ip} not present"
+    return "tailscale-check", True, f"expected address {expected_ip} present"
+
+
+def get_json(base_url: str, path: str, key: str | None) -> dict:
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(base_url + path, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        raise DriftRuntimeError(f"GET {path} returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise DriftRuntimeError(f"GET {path} failed: {exc}") from exc
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DriftRuntimeError(f"GET {path} returned invalid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise DriftRuntimeError(f"GET {path} returned a non-object JSON response")
+    return decoded
+
+
+def check_health(base_url: str, key: str | None) -> tuple[str, bool, str]:
+    try:
+        payload = get_json(base_url, "/health", key)
+    except DriftRuntimeError as exc:
+        return "health", False, str(exc)
+    status = payload.get("status")
+    if status != "available":
+        return "health", False, f"unexpected status {status!r}"
+    return "health", True, "status available"
+
+
+def check_index_set(
+    manifest: dict, base_url: str, key: str | None
+) -> tuple[tuple[str, bool, str], dict[str, dict]]:
+    try:
+        payload = get_json(base_url, "/indexes?limit=200", key)
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list):
+            raise DriftRuntimeError("GET /indexes?limit=200 response has no results list")
+        listing = {
+            str(item["uid"]): item
+            for item in raw_results
+            if isinstance(item, dict) and isinstance(item.get("uid"), str)
+        }
+    except DriftRuntimeError as exc:
+        return ("index-set", False, str(exc)), {}
+
+    indexes = manifest.get("indexes", [])
+    required = {str(item.get("uid")) for item in indexes if item.get("status") in ACTIVE_STATUSES}
+    allowed = set(required)
+    actual = set(listing)
+    problems = []
+    reserved_matched: set[str] = set()
+    for item in indexes:
+        uid = item.get("uid")
+        if item.get("status") != "reserved" or not isinstance(uid, str):
+            continue
+        prefix = uid.split("{", 1)[0] if "{" in uid else uid
+        forbidden = sorted(actual_uid for actual_uid in actual if actual_uid.startswith(prefix))
+        if forbidden:
+            reserved_matched.update(forbidden)
+            problems.append(f"reserved prefix {prefix!r}: {', '.join(forbidden)}")
+    missing = sorted(required - actual)
+    # reserved-prefixed uids already have a more specific problem line above.
+    unknown = sorted(actual - allowed - reserved_matched)
+    if missing:
+        problems.append(f"missing: {', '.join(missing)}")
+    if unknown:
+        problems.append(f"unknown: {', '.join(unknown)}")
+    if problems:
+        return ("index-set", False, "; ".join(problems)), listing
+    return ("index-set", True, f"{len(actual)} declared indexes present"), listing
+
+
+def index_path(uid: str, suffix: str = "") -> str:
+    return "/indexes/" + urllib.parse.quote(uid, safe="") + suffix
+
+
+def check_schema(
+    manifest: dict, base_url: str, key: str | None, details: dict[str, dict]
+) -> tuple[str, bool, str]:
+    problems = []
+    checked = 0
+    for item in manifest.get("indexes", []):
+        if item.get("status") != "active":
+            continue
+        uid = str(item.get("uid"))
+        schema = item.get("schema")
+        if not isinstance(schema, dict) or not isinstance(schema.get("fields"), list):
+            # Fail closed: an active index must carry a reviewable schema,
+            # otherwise primaryKey/searchable/filterable silently go unchecked.
+            problems.append(f"{uid}: active index has no reviewable schema in the manifest")
+            continue
+        checked += 1
+        try:
+            detail = get_json(base_url, index_path(uid), key)
+            details[uid] = detail
+            settings = get_json(base_url, index_path(uid, "/settings"), key)
+        except DriftRuntimeError as exc:
+            problems.append(f"{uid}: {exc}")
+            continue
+        if detail.get("primaryKey") != schema.get("primaryKey"):
+            problems.append(
+                f"{uid}: primaryKey {detail.get('primaryKey')!r} != {schema.get('primaryKey')!r}"
+            )
+        searchable = settings.get("searchableAttributes")
+        if searchable != schema.get("searchable"):
+            problems.append(f"{uid}: searchableAttributes differ")
+        filterable = settings.get("filterableAttributes")
+        expected_filterable = schema.get("filterable")
+        filterable_matches = (
+            isinstance(filterable, list)
+            and isinstance(expected_filterable, list)
+            and all(isinstance(value, str) for value in filterable + expected_filterable)
+            and set(filterable) == set(expected_filterable)
+        )
+        if not filterable_matches:
+            problems.append(f"{uid}: filterableAttributes differ")
+    if problems:
+        return "schema", False, "; ".join(problems)
+    return "schema", True, f"{checked} active schemas match"
+
+
+def parse_iso_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("timestamp is missing")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_snapshot(path: Path) -> tuple[dict, str | None]:
+    try:
+        if not path.exists():
+            return {}, None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("snapshot root is not an object")
+        return payload, None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return {}, f"cannot load snapshot: {exc}"
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def check_docs_staleness(
+    manifest: dict,
+    base_url: str,
+    key: str | None,
+    listing: dict[str, dict],
+    details: dict[str, dict],
+    state_path: Path,
+) -> tuple[tuple[str, bool, str], int]:
+    previous, load_error = load_snapshot(state_path)
+    problems = [load_error] if load_error else []
+    snapshot = {}
+    total_docs = 0
+    checked_at = utc_now_iso()
+    now = datetime.now(timezone.utc)
+    checked = 0
+    for item in manifest.get("indexes", []):
+        if item.get("status") not in ACTIVE_STATUSES:
+            continue
+        uid = str(item.get("uid"))
+        checked += 1
+        try:
+            stats = get_json(base_url, index_path(uid, "/stats"), key)
+            docs = stats.get("numberOfDocuments")
+            if not isinstance(docs, int) or isinstance(docs, bool) or docs < 0:
+                raise DriftRuntimeError("stats numberOfDocuments is not a non-negative integer")
+        except DriftRuntimeError as exc:
+            problems.append(f"{uid}: {exc}")
+            # Carry the previous baseline forward so one transient stats
+            # failure does not silently disarm the shrink check next run.
+            previous_entry = previous.get(uid)
+            if isinstance(previous_entry, dict):
+                snapshot[uid] = previous_entry
+            continue
+        total_docs += docs
+        snapshot[uid] = {"docs": docs, "checked_at": checked_at}
+        previous_entry = previous.get(uid)
+        previous_docs = previous_entry.get("docs") if isinstance(previous_entry, dict) else None
+        if item.get("status") == "active" and docs == 0:
+            problems.append(f"{uid}: active index has 0 documents")
+        elif isinstance(previous_docs, int) and not isinstance(previous_docs, bool) and previous_docs > 0:
+            if docs < 0.8 * previous_docs:
+                problems.append(f"{uid}: documents shrank from {previous_docs} to {docs} (>20%)")
+
+        slo_raw = item.get("staleness_slo_hours")
+        slo: float | None = None
+        if slo_raw is not None:
+            if isinstance(slo_raw, bool):
+                problems.append(f"{uid}: invalid staleness_slo_hours {slo_raw!r}")
+            else:
+                try:
+                    slo = float(slo_raw)
+                except (TypeError, ValueError):
+                    # Fail closed: a malformed SLO must not silently skip the check.
+                    problems.append(f"{uid}: invalid staleness_slo_hours {slo_raw!r}")
+        if slo is not None:
+            detail = details.get(uid) or listing.get(uid)
+            if not isinstance(detail, dict) or "updatedAt" not in detail:
+                try:
+                    detail = get_json(base_url, index_path(uid), key)
+                    details[uid] = detail
+                except DriftRuntimeError as exc:
+                    problems.append(f"{uid}: cannot check staleness: {exc}")
+                    continue
+            try:
+                updated_at = parse_iso_timestamp(detail.get("updatedAt"))
+            except (ValueError, TypeError) as exc:
+                problems.append(f"{uid}: invalid updatedAt: {exc}")
+                continue
+            age_hours = (now - updated_at).total_seconds() / 3600
+            if age_hours > slo:
+                problems.append(f"{uid}: stale for {age_hours:.1f}h (SLO {slo}h)")
+
+    try:
+        atomic_write_json(state_path, snapshot)
+    except OSError as exc:
+        problems.append(f"cannot save snapshot: {exc}")
+    if problems:
+        return ("docs-staleness", False, "; ".join(problems)), total_docs
+    return ("docs-staleness", True, f"{checked} indexes, {total_docs} documents"), total_docs
+
+
+def read_fail_count(path: Path) -> int:
+    try:
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            return int(previous.get("fail_count", 0))
+    except (OSError, ValueError, TypeError):
+        return 0
+    return 0
+
+
+def write_heartbeat(path: Path, ok: bool, reason: str, docs: int, duration_ms: int) -> None:
+    payload = {
+        "job": "meili-drift-check",
+        "last_run": utc_now_iso(),
+        "status": "ok" if ok else "fail",
+        "fail_count": 0 if ok else read_fail_count(path) + 1,
+        "duration_ms": int(duration_ms),
+        "docs": int(docs),
+    }
+    if not ok:
+        payload["reason"] = (reason or "failed")[:300]
+    atomic_write_json(path, payload)
+
+
+def print_result(result: tuple[str, bool, str]) -> None:
+    check_id, ok, detail = result
+    print(f"{'ok' if ok else 'FAIL'}: {check_id} {detail}")
+
+
+def run_checks(args: argparse.Namespace) -> tuple[list[tuple[str, bool, str]], int]:
+    manifest = parse_manifest(expand_path(args.manifest))
+    results = []
+    if not args.skip_host_checks:
+        expected_ip, expected_port = manifest_family_address(manifest)
+        results.append(check_bind(expected_ip, expected_port))
+        results.append(check_tailscale(expected_ip))
+
+    try:
+        base_url, key = resolve_endpoint(manifest, args.endpoint)
+    except PolicyError as exc:
+        results.append(("policy", False, str(exc)))
+        return results, 0
+
+    health = check_health(base_url, key)
+    results.append(health)
+    if not health[1]:
+        return results, 0
+
+    index_result, listing = check_index_set(manifest, base_url, key)
+    results.append(index_result)
+    details: dict[str, dict] = {}
+    results.append(check_schema(manifest, base_url, key, details))
+    docs_result, docs = check_docs_staleness(
+        manifest,
+        base_url,
+        key,
+        listing,
+        details,
+        expand_path(args.state_dir) / STATE_NAME,
+    )
+    results.append(docs_result)
+    return results, docs
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    started = time.monotonic()
+    heartbeat_path = expand_path(args.heartbeat_dir) / HEARTBEAT_NAME
+    results: list[tuple[str, bool, str]] = []
+    docs = 0
+    try:
+        results, docs = run_checks(args)
+    except (ManifestError, PolicyError, DriftRuntimeError, OSError, ValueError) as exc:
+        results.append(("error", False, str(exc)))
+    except Exception as exc:  # Keep cron output clean while still failing closed.
+        results.append(("error", False, f"unexpected {type(exc).__name__}: {exc}"))
+
+    for result in results:
+        print_result(result)
+    ok_count = sum(1 for _, ok, _ in results if ok)
+    fail_count = len(results) - ok_count
+    print(f"{ok_count} ok, {fail_count} fail")
+    reason = "; ".join(detail for _, ok, detail in results if not ok)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    try:
+        write_heartbeat(heartbeat_path, fail_count == 0, reason, docs, duration_ms)
+    except OSError as exc:
+        print(f"heartbeat write failed: {exc}", file=sys.stderr)
+        return 1
+    return 0 if fail_count == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

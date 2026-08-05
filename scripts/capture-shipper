@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""Ship OpenClaw capture spool records after fail-closed secret redaction."""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+DEFAULT_API_BASE = "https://api.supermemory.ai"
+DEFAULT_ADD_PATH = "/v3/documents"
+SECRET_SCAN = Path(__file__).resolve().parent / "secret-scan"
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+METADATA_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9 ._:/@+-]{0,256}$")
+METADATA_HIGH_RISK_TOKEN_RE = re.compile(
+    r"\b("
+    r"(?:ghp_|gho_)[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|sk-[A-Za-z0-9]{20,}"
+    r"|xox[bp]-[A-Za-z0-9-]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r")\b"
+)
+METADATA_FIELDS = ("event", "ts", "sessionKey", "agentId")
+
+
+class CaptureShipperError(Exception):
+    """Raised for configuration and processing errors."""
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def utc_day():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def safe_day(value):
+    candidate = value[:10] if isinstance(value, str) else ""
+    return candidate if DAY_RE.fullmatch(candidate) else utc_day()
+
+
+def is_safe_identifier(value):
+    return (
+        isinstance(value, str)
+        and bool(METADATA_IDENTIFIER_RE.fullmatch(value))
+        and not METADATA_HIGH_RISK_TOKEN_RE.search(value)
+    )
+
+
+def is_safe_metadata_ts(value):
+    return is_safe_identifier(value) and bool(DAY_RE.fullmatch(value[:10]))
+
+
+def ensure_private_file(path):
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise CaptureShipperError(f"cannot stat env file: {exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise CaptureShipperError("env file is not a regular file")
+    actual = stat.S_IMODE(st.st_mode)
+    if actual != 0o600:
+        raise CaptureShipperError(f"env file mode is {actual:04o}, expected 0600")
+
+
+def parse_env_file(path):
+    ensure_private_file(path)
+    values = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise CaptureShipperError(f"cannot read env file: {exc}") from exc
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key.strip()] = value
+    if not values.get("SUPERMEMORY_API_KEY"):
+        raise CaptureShipperError("SUPERMEMORY_API_KEY is required")
+    if not values.get("SUPERMEMORY_CONTAINER"):
+        raise CaptureShipperError("SUPERMEMORY_CONTAINER is required")
+    values.setdefault("SUPERMEMORY_API_BASE", DEFAULT_API_BASE)
+    values.setdefault("SUPERMEMORY_ADD_PATH", DEFAULT_ADD_PATH)
+    return values
+
+
+def build_api_url(config):
+    url = config["SUPERMEMORY_API_BASE"].rstrip("/") + "/" + config["SUPERMEMORY_ADD_PATH"].lstrip("/")
+    parts = urllib.parse.urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        raise CaptureShipperError(f"invalid Supermemory URL: {url}")
+    if parts.scheme == "https":
+        return url
+    if parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost"):
+        return url
+    raise CaptureShipperError("refusing Supermemory URL with unsupported scheme/host; use https or local HTTP")
+
+
+def atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_offset(path):
+    if not path.exists():
+        return 0
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        return int(raw or "0")
+    except (OSError, ValueError) as exc:
+        raise CaptureShipperError(f"invalid offset sidecar {path}: {exc}") from exc
+
+
+def write_offset(path, offset):
+    atomic_write(path, f"{offset}\n")
+
+
+def mkdir_private(path):
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def append_private(path, raw_line):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, raw_line)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def append_text_line(path, line):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def scan_content(content):
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SECRET_SCAN), "--redact"],
+            input=content,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except UnicodeError as exc:
+        raise CaptureShipperError(f"secret-scan unicode handling failed: {exc}") from exc
+    except OSError as exc:
+        raise CaptureShipperError(f"secret-scan failed to start: {exc}") from exc
+    if result.returncode not in (0, 1, 3):
+        raise CaptureShipperError(f"secret-scan returned unexpected exit {result.returncode}")
+    return result
+
+
+def idempotency_key(record, content):
+    seed = f"{record.get('ts', '')}\0{record.get('sessionKey', '')}\0{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def metadata_scan_text(value):
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def prepare_metadata(record):
+    metadata = {}
+    redacted = False
+    for field in METADATA_FIELDS:
+        raw_value = record.get(field, "")
+        safe = is_safe_metadata_ts(raw_value) if field == "ts" else is_safe_identifier(raw_value)
+        if safe:
+            metadata[field] = raw_value
+            continue
+
+        raw_text = metadata_scan_text(raw_value)
+        scan = scan_content(raw_text)
+        if scan.returncode == 3:
+            raise CaptureShipperError(f"secret-scan failed closed for metadata {field}")
+        if scan.returncode not in (0, 1):
+            raise CaptureShipperError(f"secret-scan unexpected failure for metadata {field}")
+        metadata[field] = scan.stdout
+        redacted = redacted or scan.returncode == 1
+    return metadata, redacted
+
+
+def build_payload(record, content, container, metadata_fields):
+    return {
+        "content": content,
+        "containerTags": [container],
+        "metadata": {
+            "source": "openclaw-capture",
+            "event": metadata_fields["event"],
+            "ts": metadata_fields["ts"],
+            "sessionKey": metadata_fields["sessionKey"],
+            "agentId": metadata_fields["agentId"],
+            "idempotencyKey": idempotency_key(record, content),
+        },
+    }
+
+
+def should_retry(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return 500 <= exc.code < 600
+    return isinstance(exc, urllib.error.URLError)
+
+
+def post_payload(url, api_key, payload):
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        response.read()
+        return response.status
+
+
+def send_with_retries(url, api_key, payload):
+    attempt = 0
+    while True:
+        try:
+            return post_payload(url, api_key, payload)
+        except Exception as exc:
+            if attempt >= 2 or not should_retry(exc):
+                raise
+            time.sleep(2**attempt)
+            attempt += 1
+
+
+def destination_for(sent_dir, path):
+    target = sent_dir / path.name
+    if not target.exists():
+        return target
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = sent_dir / f"{stem}.{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise CaptureShipperError(f"cannot find sent destination for {path.name}")
+
+
+def decode_record(raw_line):
+    try:
+        text = raw_line.decode("utf-8")
+        data = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CaptureShipperError(f"invalid spool record: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CaptureShipperError("spool record is not a JSON object")
+    content = data.get("content")
+    if not isinstance(content, str):
+        raise CaptureShipperError("spool record content is missing or not a string")
+    return data, content
+
+
+def process_file(path, spool, config, args, metrics, remaining):
+    offset_path = path.with_suffix(path.suffix + ".offset")
+    offset = read_offset(offset_path)
+    fully_shipped = False
+    processed = 0
+    url = config["SUPERMEMORY_ADD_URL"]
+
+    try:
+        current_size = path.stat().st_size
+    except OSError as exc:
+        raise CaptureShipperError(f"cannot stat {path}: {exc}") from exc
+    if offset > current_size:
+        print(
+            f"capture-shipper: {path.name}: offset {offset} is beyond current size {current_size}; leaving file in spool",
+            file=sys.stderr,
+        )
+        metrics["failed"] += 1
+        return 0, False
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            while True:
+                line_start = handle.tell()
+                raw_line = handle.readline()
+                if not raw_line:
+                    fully_shipped = True
+                    break
+                line_end = handle.tell()
+                if remaining is not None and processed >= remaining:
+                    break
+
+                try:
+                    record, content = decode_record(raw_line)
+                except CaptureShipperError as exc:
+                    print(f"capture-shipper: {path.name}:{line_start}: {exc}", file=sys.stderr)
+                    quarantine_dir = spool / "quarantine"
+                    mkdir_private(quarantine_dir)
+                    append_private(quarantine_dir / f"{utc_day()}.jsonl", raw_line)
+                    metrics["failed"] += 1
+                    metrics["quarantined"] += 1
+                    if not args.dry_run:
+                        write_offset(offset_path, line_end)
+                    continue
+
+                metrics["records"] += 1
+                if not content.strip():
+                    metrics["skipped"] += 1
+                    if not args.dry_run:
+                        write_offset(offset_path, line_end)
+                    processed += 1
+                    continue
+
+                try:
+                    scan = scan_content(content)
+                except CaptureShipperError as exc:
+                    print(f"capture-shipper: secret-scan failed for {path.name}:{line_start}: {exc}", file=sys.stderr)
+                    metrics["failed"] += 1
+                    break
+                if scan.returncode == 3:
+                    print(f"capture-shipper: secret-scan failed closed for {path.name}:{line_start}", file=sys.stderr)
+                    metrics["failed"] += 1
+                    break
+                if scan.returncode not in (0, 1):
+                    print(f"capture-shipper: secret-scan unexpected failure for {path.name}:{line_start}", file=sys.stderr)
+                    metrics["failed"] += 1
+                    break
+
+                outbound_content = content if scan.returncode == 0 else scan.stdout
+                try:
+                    metadata_fields, metadata_redacted = prepare_metadata(record)
+                except CaptureShipperError as exc:
+                    print(f"capture-shipper: secret-scan failed for {path.name}:{line_start}: {exc}", file=sys.stderr)
+                    metrics["failed"] += 1
+                    break
+
+                record_redacted = scan.returncode == 1 or metadata_redacted
+                if record_redacted:
+                    quarantine_dir = spool / "quarantine"
+                    mkdir_private(quarantine_dir)
+                    quarantine_name = safe_day(record.get("ts"))
+                    append_private(quarantine_dir / f"{quarantine_name}.jsonl", raw_line)
+                    # Redacted/quarantined metrics count records, not individual fields.
+                    metrics["redacted"] += 1
+                    metrics["quarantined"] += 1
+
+                payload = build_payload(record, outbound_content, config["SUPERMEMORY_CONTAINER"], metadata_fields)
+                if args.dry_run:
+                    print(
+                        f"capture-shipper: dry-run would send event={record.get('event', '')} bytes={len(outbound_content.encode('utf-8'))}",
+                        file=sys.stderr,
+                    )
+                else:
+                    try:
+                        send_with_retries(url, config["SUPERMEMORY_API_KEY"], payload)
+                    except Exception as exc:
+                        error_name = f"HTTPError {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+                        print(f"capture-shipper: send failed for {path.name}:{line_start}: {error_name}", file=sys.stderr)
+                        metrics["failed"] += 1
+                        break
+                    metrics["sent"] += 1
+                    metrics["bytes_sent"] += len(outbound_content.encode("utf-8"))
+                    write_offset(offset_path, line_end)
+
+                processed += 1
+    except OSError as exc:
+        raise CaptureShipperError(f"cannot process {path}: {exc}") from exc
+
+    if fully_shipped and not args.dry_run:
+        sent_dir = spool / "sent"
+        mkdir_private(sent_dir)
+        os.replace(path, destination_for(sent_dir, path))
+        if offset_path.exists():
+            offset_path.unlink()
+    return processed, fully_shipped
+
+
+def spool_files(spool):
+    return sorted(path for path in spool.glob("*.jsonl") if path.is_file())
+
+
+def append_metrics(spool, metrics):
+    line = (
+        f"{utc_now()} | files={metrics['files']} records={metrics['records']} sent={metrics['sent']} "
+        f"redacted={metrics['redacted']} quarantined={metrics['quarantined']} skipped={metrics['skipped']} failed={metrics['failed']} "
+        f"bytes_sent={metrics['bytes_sent']}\n"
+    )
+    append_text_line(spool / "metrics.log", line)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Ship OpenClaw capture spool JSONL records to Supermemory.")
+    parser.add_argument("--spool", required=True, type=Path, help="capture spool directory")
+    parser.add_argument("--env-file", required=True, type=Path, help="0600 env file containing Supermemory settings")
+    parser.add_argument("--dry-run", action="store_true", help="scan and report without POSTing, advancing offsets, or moving sent files")
+    parser.add_argument("--max-batch", type=int, default=None, help="maximum records to process in this run")
+    args = parser.parse_args(argv)
+    if args.max_batch is not None and args.max_batch <= 0:
+        parser.error("--max-batch must be positive")
+    return args
+
+
+def run(argv):
+    args = parse_args(argv)
+    config = parse_env_file(args.env_file)
+    config["SUPERMEMORY_ADD_URL"] = build_api_url(config)
+    spool = args.spool
+    if not spool.exists():
+        raise CaptureShipperError(f"spool does not exist: {spool}")
+    if not spool.is_dir():
+        raise CaptureShipperError(f"spool is not a directory: {spool}")
+
+    metrics = {
+        "files": 0,
+        "records": 0,
+        "sent": 0,
+        "redacted": 0,
+        "quarantined": 0,
+        "skipped": 0,
+        "failed": 0,
+        "bytes_sent": 0,
+    }
+    processed_total = 0
+    try:
+        for path in spool_files(spool):
+            if args.max_batch is not None and processed_total >= args.max_batch:
+                break
+            metrics["files"] += 1
+            remaining = None if args.max_batch is None else args.max_batch - processed_total
+            processed, _fully_shipped = process_file(path, spool, config, args, metrics, remaining)
+            processed_total += processed
+    finally:
+        append_metrics(spool, metrics)
+    return 1 if metrics["failed"] else 0
+
+
+def main(argv=None):
+    try:
+        return run(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            return 0
+        return 1
+    except CaptureShipperError as exc:
+        print(f"capture-shipper: error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

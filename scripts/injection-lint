@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""Lint per-agent fixed injection manifests for size budgets and stale facts."""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print(
+        "injection-lint: PyYAML is required (pip install pyyaml). "
+        "content-lint and injection-lint are the only two FMA scripts with a "
+        "dependency beyond the Python standard library.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+SEVERITIES = ("OK", "WARNING", "VIOLATION", "ERROR")
+BAD_SEVERITIES = {"WARNING", "VIOLATION", "ERROR"}
+MAX_CONTENT_BYTES = 1_000_000
+AGENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+HOST_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$")
+PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+AS_OF_RE = re.compile(r"[\(（]as\s+of\s+([0-9]{4}-[0-9]{2}-[0-9]{2}|[^)）]+)[\)）]", re.IGNORECASE)
+
+# Manifest report.channel, fail_threshold, alert_owner, and stale_alert_days are
+# schema-declared, but v1 only implements report.also: state-file JSON output.
+# Hot-inbox wiring is a deliberate reviewed deferral to a later PR.
+
+
+class InjectionLintError(Exception):
+    """Raised when an injection manifest cannot be linted."""
+
+
+class TargetReadError(Exception):
+    """Raised when a target file cannot be read as UTF-8 text."""
+
+
+def repo_root():
+    return Path(__file__).resolve().parent.parent
+
+
+def default_manifest_dir():
+    return repo_root() / "manifests" / "injection"
+
+
+def state_dir():
+    return Path(os.path.expanduser("~/.claude/state/injection-lint"))
+
+
+def load_yaml(path):
+    try:
+        with Path(path).open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise InjectionLintError(f"cannot parse {path}: {exc}") from exc
+    except OSError as exc:
+        raise InjectionLintError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise InjectionLintError(f"{path}: expected a YAML mapping")
+    return data
+
+
+def load_platform_caps(manifest_dir):
+    path = Path(manifest_dir) / "platform-caps.yaml"
+    data = load_yaml(path)
+    if not isinstance(data.get("platforms"), dict):
+        raise InjectionLintError(f"{path}: missing required platforms mapping")
+    warn_ratio = data.get("warn_ratio")
+    if isinstance(warn_ratio, bool) or not isinstance(warn_ratio, (int, float)):
+        raise InjectionLintError(f"{path}: missing required numeric warn_ratio")
+    if not 0 < warn_ratio <= 1:
+        raise InjectionLintError(f"{path}: warn_ratio must be > 0 and <= 1")
+    return data
+
+
+def require_mapping(data, key, label):
+    value = data.get(key)
+    if not isinstance(value, dict):
+        raise InjectionLintError(f"{label}: missing required mapping {key}")
+    return value
+
+
+def require_list(data, key, label):
+    value = data.get(key)
+    if not isinstance(value, list):
+        raise InjectionLintError(f"{label}: missing required list {key}")
+    return value
+
+
+def contains_parent_segment(path_text):
+    return ".." in path_text.split("/")
+
+
+def validate_manifest(manifest, label, platform_caps=None):
+    for key in ("agent", "platform"):
+        if not isinstance(manifest.get(key), str) or not manifest[key]:
+            raise InjectionLintError(f"{label}: missing required string {key}")
+    if not AGENT_RE.match(manifest["agent"]):
+        raise InjectionLintError(f"{label}: agent must match {AGENT_RE.pattern}")
+    workspace = manifest.get("workspace", "")
+    if "workspace" in manifest and not isinstance(workspace, str):
+        raise InjectionLintError(f"{label}: workspace must be a string")
+    host = manifest.get("host")
+    if host is not None:
+        if not isinstance(host, str) or not HOST_RE.match(host):
+            raise InjectionLintError(f"{label}: host must match {HOST_RE.pattern}")
+    files = require_list(manifest, "files", label)
+    for index, entry in enumerate(files, 1):
+        if not isinstance(entry, dict):
+            raise InjectionLintError(f"{label}: files[{index}] must be a mapping")
+        for key in ("path", "role", "max_chars"):
+            if key not in entry:
+                raise InjectionLintError(f"{label}: files[{index}] missing required {key}")
+        if not isinstance(entry["path"], str) or not entry["path"]:
+            raise InjectionLintError(f"{label}: files[{index}] path must be a non-empty string")
+        if not PATH_RE.match(entry["path"]) or contains_parent_segment(entry["path"]):
+            raise InjectionLintError(f"{label}: files[{index}] path contains invalid characters or '..'")
+        if not entry["path"].startswith("/") and not workspace:
+            raise InjectionLintError(f"{label}: workspace is required for relative file paths")
+        if not isinstance(entry["role"], str) or not entry["role"]:
+            raise InjectionLintError(f"{label}: files[{index}] role must be a non-empty string")
+        if isinstance(entry["max_chars"], bool) or not isinstance(entry["max_chars"], int):
+            raise InjectionLintError(f"{label}: files[{index}] max_chars must be a positive integer")
+        if entry["max_chars"] <= 0:
+            raise InjectionLintError(f"{label}: files[{index}] max_chars must be a positive integer")
+    rot = require_mapping(manifest, "rot", label)
+    if not isinstance(rot.get("as_of_ttl_days"), int):
+        raise InjectionLintError(f"{label}: rot.as_of_ttl_days must be an integer")
+    if not isinstance(rot.get("applies_to_roles"), list):
+        raise InjectionLintError(f"{label}: rot.applies_to_roles must be a list")
+    require_mapping(manifest, "report", label)
+    if platform_caps is not None:
+        platform = platform_for(manifest, platform_caps)
+        applicable_file_cap = smallest_file_cap(platform)
+        if applicable_file_cap is not None:
+            for index, entry in enumerate(files, 1):
+                if entry["max_chars"] > applicable_file_cap:
+                    raise InjectionLintError(
+                        f"{label}: files[{index}] max_chars {entry['max_chars']} exceeds platform cap {applicable_file_cap}"
+                    )
+
+
+def resolve_target_path(entry, manifest):
+    path_text = entry["path"]
+    if path_text.startswith("/"):
+        return path_text
+    workspace = manifest["workspace"]
+    if manifest.get("host"):
+        return workspace.rstrip("/") + "/" + path_text
+    return str(Path(workspace).expanduser() / path_text)
+
+
+def read_target(entry, manifest):
+    target_path = resolve_target_path(entry, manifest)
+    host = manifest.get("host")
+    try:
+        if host:
+            remote_command = f"cat -- {shlex.quote(target_path)}"
+            result = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host, remote_command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                reason = result.stderr.decode("utf-8", errors="replace").strip()
+                if not reason:
+                    reason = f"ssh cat exited {result.returncode}"
+                raise TargetReadError(f"{target_path}: {reason}")
+            data = result.stdout
+        else:
+            data = Path(target_path).read_bytes()
+        if len(data) > MAX_CONTENT_BYTES:
+            raise TargetReadError(f"{target_path}: file too large to lint ({len(data)} bytes > {MAX_CONTENT_BYTES})")
+        return data.decode("utf-8")
+    except subprocess.TimeoutExpired as exc:
+        raise TargetReadError(f"{target_path}: ssh cat timed out after 30s") from exc
+    except UnicodeDecodeError as exc:
+        raise TargetReadError(f"{target_path}: cannot decode UTF-8: {exc}") from exc
+    except OSError as exc:
+        raise TargetReadError(f"{target_path}: {exc}") from exc
+
+
+def finding(scope, severity, message, **extra):
+    item = {"scope": scope, "severity": severity, "message": message}
+    item.update(extra)
+    return item
+
+
+def platform_for(manifest, platform_caps):
+    platform_key = manifest["platform"]
+    platforms = platform_caps["platforms"]
+    if platform_key not in platforms or not isinstance(platforms[platform_key], dict):
+        raise InjectionLintError(f"{manifest['agent']}: unknown platform {platform_key!r}")
+    return platforms[platform_key]
+
+
+def smallest_file_cap(platform):
+    caps = [
+        platform.get("per_file_chars"),
+        platform.get("context_per_file_chars"),
+    ]
+    caps = [cap for cap in caps if cap is not None]
+    return min(caps) if caps else None
+
+
+def as_of_date_issues(text, ttl_days, today):
+    stale = []
+    unparseable = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        for match in AS_OF_RE.finditer(line):
+            date_text = match.group(1)
+            try:
+                parsed = datetime.date.fromisoformat(date_text)
+            except ValueError:
+                unparseable.append({"line": line_number, "text": match.group(0)})
+                continue
+            if (today - parsed).days > ttl_days:
+                stale.append({"line": line_number, "date": date_text})
+    return stale, unparseable
+
+
+def stale_as_of_dates(text, ttl_days, today):
+    stale, _ = as_of_date_issues(text, ttl_days, today)
+    return stale
+
+
+def lint_manifest(manifest, platform_caps, today=None, reader=read_target):
+    validate_manifest(manifest, manifest.get("agent", "<manifest>"), platform_caps)
+    today = today or datetime.date.today()
+    agent = manifest["agent"]
+    platform = platform_for(manifest, platform_caps)
+    warn_ratio = platform_caps["warn_ratio"]
+    applicable_file_cap = smallest_file_cap(platform)
+    applies_to_roles = set(manifest["rot"]["applies_to_roles"])
+    ttl_days = manifest["rot"]["as_of_ttl_days"]
+    findings = []
+    total_chars = 0
+    error_files = 0
+    shared_files = 0
+
+    for entry in manifest["files"]:
+        scope = entry["path"]
+        try:
+            text = reader(entry, manifest)
+        except TargetReadError as exc:
+            findings.append(finding(scope, "ERROR", f"{scope}: {exc}"))
+            error_files += 1
+            continue
+
+        byte_count = len(text.encode("utf-8"))
+        if byte_count > MAX_CONTENT_BYTES:
+            findings.append(
+                finding(
+                    scope,
+                    "ERROR",
+                    f"{scope}: file too large to lint ({byte_count} bytes > {MAX_CONTENT_BYTES})",
+                    bytes=byte_count,
+                )
+            )
+            error_files += 1
+            continue
+
+        # JS String.length is UTF-16 code units: emoji / astral characters are
+        # 2 units, and Python len(str) undercounts those. Re-encode as UTF-16LE.
+        chars = len(text.encode("utf-16-le")) // 2
+        if entry.get("shared") is True:
+            shared_files += 1
+        else:
+            total_chars += chars
+        before_count = len(findings)
+        file_has_violation = False
+
+        if chars > entry["max_chars"]:
+            findings.append(
+                finding(
+                    scope,
+                    "VIOLATION",
+                    f"{scope}: {chars} chars exceeds max_chars {entry['max_chars']}",
+                    chars=chars,
+                    max_chars=entry["max_chars"],
+                )
+            )
+            file_has_violation = True
+
+        if applicable_file_cap is not None and chars > applicable_file_cap:
+            findings.append(
+                finding(
+                    scope,
+                    "VIOLATION",
+                    f"{scope}: {chars} chars exceeds platform cap {applicable_file_cap}",
+                    chars=chars,
+                    platform_cap_chars=applicable_file_cap,
+                )
+            )
+            file_has_violation = True
+
+        if not file_has_violation and chars >= warn_ratio * entry["max_chars"] and chars <= entry["max_chars"]:
+            findings.append(
+                finding(
+                    scope,
+                    "WARNING",
+                    f"{scope}: {chars} chars approaching max_chars {entry['max_chars']}",
+                    chars=chars,
+                    max_chars=entry["max_chars"],
+                )
+            )
+
+        if not file_has_violation and applicable_file_cap is not None and chars >= warn_ratio * applicable_file_cap:
+            findings.append(
+                finding(
+                    scope,
+                    "WARNING",
+                    f"{scope}: {chars} chars approaching platform cap {applicable_file_cap}",
+                    chars=chars,
+                    platform_cap_chars=applicable_file_cap,
+                )
+            )
+
+        if entry["role"] in applies_to_roles:
+            stale, unparseable = as_of_date_issues(text, ttl_days, today)
+            for item in unparseable:
+                findings.append(
+                    finding(
+                        scope,
+                        "WARNING",
+                        f"{scope}: unparseable as-of date on line {item['line']}: {item['text']}",
+                        unparseable_as_of_date=item,
+                    )
+                )
+            if stale:
+                pairs = ", ".join(f"line {item['line']} {item['date']}" for item in stale)
+                findings.append(
+                    finding(
+                        scope,
+                        "WARNING",
+                        f"{scope}: stale as-of date(s) older than {ttl_days} days: {pairs}",
+                        stale_dates=stale,
+                    )
+                )
+
+        if len(findings) == before_count:
+            findings.append(finding(scope, "OK", f"{scope}: {chars} chars within budget", chars=chars))
+
+    total_cap = platform.get("total_chars")
+    if total_cap is not None:
+        shared_note = f"; excluded {shared_files} shared file(s) from total" if shared_files else ""
+        if total_chars > total_cap:
+            findings.append(
+                finding(
+                    "total",
+                    "VIOLATION",
+                    f"{agent}: total {total_chars} chars exceeds platform total_chars {total_cap}{shared_note}",
+                    chars=total_chars,
+                    total_chars=total_cap,
+                )
+            )
+        elif error_files:
+            findings.append(
+                finding(
+                    "total",
+                    "WARNING",
+                    f"{agent}: total indeterminate ({error_files} files unreadable){shared_note}",
+                    chars=total_chars,
+                    total_chars=total_cap,
+                    unreadable_files=error_files,
+                )
+            )
+        elif total_chars >= warn_ratio * total_cap:
+            findings.append(
+                finding(
+                    "total",
+                    "WARNING",
+                    f"{agent}: total {total_chars} chars approaching platform total_chars {total_cap}{shared_note}",
+                    chars=total_chars,
+                    total_chars=total_cap,
+                )
+            )
+        else:
+            findings.append(
+                finding(
+                    "total",
+                    "OK",
+                    f"{agent}: total {total_chars} chars within platform total_chars {total_cap}{shared_note}",
+                    chars=total_chars,
+                    total_chars=total_cap,
+                )
+            )
+
+    return agent_result(agent, findings)
+
+
+def agent_result(agent, findings):
+    summary = {severity: 0 for severity in SEVERITIES}
+    for item in findings:
+        summary[item["severity"]] = summary.get(item["severity"], 0) + 1
+    summary["total"] = len(findings)
+    return {"agent": agent, "findings": findings, "summary": summary}
+
+
+def run_exit_code(agent_results):
+    worst = 0
+    for result in agent_results:
+        severities = {item["severity"] for item in result["findings"]}
+        if severities & {"VIOLATION", "ERROR"}:
+            worst = max(worst, 2)
+        elif severities & {"WARNING"}:
+            worst = max(worst, 1)
+    return worst
+
+
+def render_human(payload):
+    lines = []
+    for result in payload["agents"]:
+        summary = result["summary"]
+        lines.append(f"Agent {result['agent']}: OK={summary.get('OK', 0)} WARNING={summary.get('WARNING', 0)} VIOLATION={summary.get('VIOLATION', 0)} ERROR={summary.get('ERROR', 0)}")
+        for item in result["findings"]:
+            lines.append(f"- {item['scope']}: {item['severity']}: {item['message']}")
+        lines.append("")
+    lines.append(f"exit_code: {payload['exit_code']}")
+    return "\n".join(lines).rstrip()
+
+
+def write_agent_state(result, output_dir=None):
+    output_dir = Path(output_dir) if output_dir is not None else state_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = output_dir.resolve()
+    path = (output_dir / f"{result['agent']}-latest.json").resolve()
+    try:
+        path.relative_to(output_dir)
+    except ValueError as exc:
+        raise OSError(f"state path escapes state dir: {path}") from exc
+    payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    path.write_text(payload, encoding="utf-8")
+
+
+def manifest_paths(args):
+    manifest_dir = Path(args.manifest_dir)
+    if args.all:
+        return [
+            path
+            for path in sorted(manifest_dir.glob("*.yaml"))
+            if path.name != "platform-caps.yaml"
+        ]
+    return [manifest_dir / f"{args.agent}.yaml"]
+
+
+def process_manifest_path(path, platform_caps, today, reader):
+    fallback_agent = Path(path).stem
+    try:
+        manifest = load_yaml(path)
+        validate_manifest(manifest, str(path), platform_caps)
+        return lint_manifest(manifest, platform_caps, today=today, reader=reader)
+    except Exception as exc:
+        return agent_result(
+            fallback_agent,
+            [finding(fallback_agent, "ERROR", f"{fallback_agent}: {exc}")],
+        )
+
+
+def build_payload(paths, platform_caps, today, reader):
+    results = [process_manifest_path(path, platform_caps, today, reader) for path in paths]
+    return {"agents": results, "exit_code": run_exit_code(results)}
+
+
+def main(argv=None, today=None, reader=read_target, output_state_dir=None):
+    parser = argparse.ArgumentParser(description="Lint agent injection files.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("agent", nargs="?", help="agent manifest name")
+    target.add_argument("--all", action="store_true", help="lint all agent manifests")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument("--manifest-dir", default=str(default_manifest_dir()), help="manifest directory")
+    args = parser.parse_args(argv)
+
+    try:
+        platform_caps = load_platform_caps(args.manifest_dir)
+    except InjectionLintError as exc:
+        payload = {"agents": [], "error": str(exc), "exit_code": 2}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    paths = manifest_paths(args)
+    if not paths:
+        payload = {"agents": [], "error": f"{args.manifest_dir}: no agent manifests found", "exit_code": 2}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"ERROR: {payload['error']}", file=sys.stderr)
+        return 2
+
+    payload = build_payload(paths, platform_caps, today or datetime.date.today(), reader)
+    for result in payload["agents"]:
+        try:
+            write_agent_state(result, output_state_dir)
+        except OSError as exc:
+            result["findings"].append(
+                finding("state-file", "ERROR", f"{result['agent']}: cannot write state-file: {exc}")
+            )
+            result.update(agent_result(result["agent"], result["findings"]))
+    payload["exit_code"] = run_exit_code(payload["agents"])
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(render_human(payload))
+    return payload["exit_code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

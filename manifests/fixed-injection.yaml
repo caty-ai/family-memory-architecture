@@ -1,0 +1,70 @@
+# fixed-injection.yaml — allow-list and caps for one agent's fixed per-session injection (DESIGN §C1)
+# Verification: scripts/injection-budget-check reconciles this manifest against measurements.
+#
+# The three enforcement classes (DESIGN §2 principle 4 — "honest separation of machine
+# enforcement and norms"):
+#   - blocking    : exceeding the cap exits 2 (stays red until a human trims). Applied to
+#                   hand-edited sources the agent can actually shrink.
+#   - generator   : caps are assumed enforced by the generating side; an overrun means the
+#                   generator itself is buggy, so it also exits 2.
+#   - alert-only  : overruns warn (exit 1) only. Applied to dynamic injection that cannot be
+#                   truncated mid-session.
+#
+# Numbers: set target_total_bytes to the sum of your per-source caps, derived from real
+# measurements — never aspirations. When a measurement invalidates an assumption, update the
+# manifest to the measured value and record why (see the worked example below).
+#
+# Note: paths are local to the agent's machine. When rolling out to other agents, create one
+# manifest per agent (see manifests/injection/).
+# Notation: quote any string value containing `#` or `'` (the constrained parser drops
+# unquoted `#` and everything after it as a comment).
+#
+# This file ships as a worked example for one Claude Code agent ("agent-a"); replace paths,
+# caps, and sources with your own measured values.
+
+version: 1
+agent: agent-a
+generated_at: "2026-08-05"   # authoring date metadata (hand-edited file; not subject to the §5 generated_at rule for generated artifacts)
+target_total_bytes: 28500
+
+sources:
+  - id: claude-md-user
+    desc: "User-global CLAUDE.md. Measured as two segments split at a marker: a plugin-managed region and the user-preferences region"
+    path: "~/.claude/CLAUDE.md"
+    kind: hand-edited
+    max_bytes: 11500                    # whole file. When segment-split, this acts as the warning line (growth watch for the plugin-managed part)
+    segment_boundary: "<!-- OMC:END -->"
+    enforced_segment: after             # blocking applies only past the boundary (= the region the agent can edit)
+    max_bytes_enforced_segment: 6800    # measured size + ~3% headroom
+    note: "the plugin-managed region (before the boundary) is not editable by the agent, so it is watch-only; plugin-driven growth must not block the agent"
+
+  - id: memory-index
+    desc: "Auto-memory MEMORY.md (only the index is injected; individual memory files lazy-load)"
+    path: "~/.claude/projects/-Users-you-workspace/memory/MEMORY.md"
+    kind: hand-edited
+    max_bytes: 7500                     # measured with ~0.3% headroom. Assumes the one-line-per-memory discipline; when it grows, trim instead of appending
+    note: "auto-memory is keyed by project slug. This assumes the agent starts every session from the same workspace root; other launch dirs get other slugs, outside this manifest's scope"
+
+  - id: supermemory-injection
+    desc: "SessionStart injection from a memory plugin (recalled-context block)"
+    kind: dynamic
+    enforcement: alert-only             # cannot be truncated mid-session; overruns alert but never block injection
+    max_bytes: 3000                     # measured
+    # Worked example of measurement-driven cap setting: an initially planned lower cap (2000)
+    # was rejected because forgetting content did not shrink the injection — top-N refill kept
+    # the size constant (measured 2898 -> 2990 bytes across a bulk forget). Forgetting improves
+    # QUALITY of what fills the slots; shrinking SIZE requires controlling the plugin's item
+    # count/format. The cap therefore reflects the measured floor, with follow-up work tracked.
+    measure_hint: "byte count of the recalled-context block in a recent transcript; supply via --measured supermemory-injection=<bytes>"
+
+  - id: harness-hooks
+    desc: "Total SessionStart/PreToolUse injection from harness hooks (keyword detectors, mode reminders, etc.)"
+    kind: dynamic
+    enforcement: alert-only             # the harness side is out of scope; watch only, reduce via its own settings
+    max_bytes: 6500                     # measured + ~8%
+    measure_hint: "manual record; re-measure when the harness updates. Supply via --measured harness-hooks=<bytes>"
+
+# Detecting sources OUTSIDE the allow-list (future work): the current injection-budget-check
+# only reconciles what the manifest lists. Automatic discovery of unlisted persistent
+# SessionStart injection (silent growth from newly added hooks) needs transcript scanning —
+# a candidate for a shared job-infrastructure implementation.

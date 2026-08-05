@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Detect duplicated fixed-injection facts for DESIGN v0.3 §C1 / Issue #2.
+
+The optional --fuzzy pass uses difflib SequenceMatcher pairwise comparisons. That is
+O(n^2) string-similarity work across candidate units, so routine weekly checks should
+run without --fuzzy unless fuzzy drift detection is explicitly needed.
+"""
+
+import argparse
+import difflib
+import os
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+
+
+DEFAULT_CLAUDE_MD = "~/.claude/CLAUDE.md"
+DEFAULT_MEMORY_MD = "~/.claude/projects/-Users-you-workspace/memory/MEMORY.md"
+
+
+@dataclass(frozen=True)
+class Unit:
+    source: str
+    path: str
+    line_number: int
+    normalized: str
+    raw: str
+
+
+@dataclass(frozen=True)
+class Match:
+    match_type: str
+    left: Unit
+    right: Unit
+    ratio: float = 0.0
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def strip_markdown(line):
+    text = line.strip()
+    text = re.sub(r"^#+\s*", "", text)
+    text = re.sub(r"^[-*]\s+", "", text)
+    text = re.sub(r"^>\s?", "", text)
+    text = text.replace("|", " ")
+    text = text.replace("[[", "").replace("]]", "")
+    for marker in ("**", "__", "*", "_"):
+        text = text.replace(marker, "")
+    return text
+
+
+def normalize_unit(text):
+    text = unicodedata.normalize("NFKC", text).casefold()
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("ー", "-")
+    text = re.sub(r"[、。・「」『』]", "", text)
+    # Conservative punctuation handling: remove common ASCII punctuation only from
+    # the outer edges, preserving internal punctuation that may carry meaning.
+    return text.strip(" \t\r\n.,;:!?()[]{}<>\"'`~#*-_|")
+
+
+def extract_units(path, label, min_len):
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"{label} is missing or unreadable: {path} ({exc})") from exc
+
+    units = []
+    for line_number, raw in enumerate(lines, 1):
+        normalized = normalize_unit(strip_markdown(raw))
+        if len(normalized) >= min_len:
+            units.append(Unit(label, str(path), line_number, normalized, raw))
+    return units
+
+
+def length_guard(a, b):
+    if not a or not b:
+        return False
+    # This caps the expensive cross-product work: a tiny unit inside a much longer
+    # paragraph is usually not useful fact-drift evidence, so ratios over 3:1 are
+    # skipped for containment and fuzzy comparison.
+    return not (len(a) > 3 * len(b) or len(b) > 3 * len(a))
+
+
+def find_pair_matches(left_units, right_units, fuzzy=False):
+    matches = []
+    reported = set()
+
+    by_normalized = {}
+    for unit in right_units:
+        by_normalized.setdefault(unit.normalized, []).append(unit)
+
+    for left in left_units:
+        for right in by_normalized.get(left.normalized, []):
+            reported.add((left.line_number, right.line_number))
+            matches.append(Match("EXACT", left, right))
+
+    for left in left_units:
+        for right in right_units:
+            pair_key = (left.line_number, right.line_number)
+            if pair_key in reported:
+                continue
+            if not length_guard(left.normalized, right.normalized):
+                continue
+            if left.normalized in right.normalized or right.normalized in left.normalized:
+                reported.add(pair_key)
+                matches.append(Match("CONTAINS", left, right))
+
+    if fuzzy:
+        for left in left_units:
+            for right in right_units:
+                pair_key = (left.line_number, right.line_number)
+                if pair_key in reported:
+                    continue
+                if not length_guard(left.normalized, right.normalized):
+                    continue
+                ratio = difflib.SequenceMatcher(None, left.normalized, right.normalized).ratio()
+                if ratio >= 0.85:
+                    reported.add(pair_key)
+                    matches.append(Match("FUZZY", left, right, ratio))
+
+    return matches
+
+
+def truncate(text, limit=120):
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def render_report(source_order, pair_matches, skipped_supermemory):
+    lines = []
+    if skipped_supermemory:
+        lines.append("SKIPPED: supermemory export not provided (pass --supermemory-export FILE to include it)")
+        lines.append("")
+
+    total = 0
+    summary = {}
+    for left_label, right_label in source_order:
+        heading = f"{left_label} vs {right_label}"
+        matches = pair_matches.get((left_label, right_label), [])
+        lines.append(f"=== {heading} ===")
+        if not matches:
+            lines.append("No overlaps found.")
+        for match in matches:
+            total += 1
+            type_label = match.match_type
+            if match.match_type == "FUZZY":
+                type_label = f"FUZZY r={match.ratio:.2f}"
+            lines.append(type_label)
+            lines.append(f"  {match.left.source}:{match.left.line_number}: {truncate(match.left.raw)}")
+            lines.append(f"  {match.right.source}:{match.right.line_number}: {truncate(match.right.raw)}")
+            summary.setdefault(heading, {}).setdefault(match.match_type, 0)
+            summary[heading][match.match_type] += 1
+        lines.append("")
+
+    lines.append("=== summary ===")
+    for left_label, right_label in source_order:
+        heading = f"{left_label} vs {right_label}"
+        counts = summary.get(heading, {})
+        exact = counts.get("EXACT", 0)
+        contains = counts.get("CONTAINS", 0)
+        fuzzy = counts.get("FUZZY", 0)
+        lines.append(f"{heading}: EXACT={exact} CONTAINS={contains} FUZZY={fuzzy} TOTAL={exact + contains + fuzzy}")
+    lines.append(f"total overlaps: {total}")
+    return "\n".join(lines)
+
+
+def build_report(args):
+    sources = []
+    claude_path = expand_path(args.claude_md)
+    memory_path = expand_path(args.memory_md)
+    sources.append(("claude-md", extract_units(claude_path, "claude-md", args.min_len)))
+    sources.append(("memory-md", extract_units(memory_path, "memory-md", args.min_len)))
+
+    skipped_supermemory = args.supermemory_export is None
+    if args.supermemory_export:
+        supermemory_path = expand_path(args.supermemory_export)
+        sources.append(("supermemory", extract_units(supermemory_path, "supermemory", args.min_len)))
+
+    source_order = []
+    pair_matches = {}
+    for left_index in range(len(sources)):
+        for right_index in range(left_index + 1, len(sources)):
+            left_label, left_units = sources[left_index]
+            right_label, right_units = sources[right_index]
+            source_order.append((left_label, right_label))
+            pair_matches[(left_label, right_label)] = find_pair_matches(left_units, right_units, args.fuzzy)
+
+    total_matches = sum(len(matches) for matches in pair_matches.values())
+    return render_report(source_order, pair_matches, skipped_supermemory), total_matches
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Detect duplicate facts across fixed injection sources.")
+    parser.add_argument("--claude-md", default=DEFAULT_CLAUDE_MD, help="path to CLAUDE.md")
+    parser.add_argument("--memory-md", default=DEFAULT_MEMORY_MD, help="path to MEMORY.md")
+    parser.add_argument("--supermemory-export", help="optional Supermemory export path")
+    parser.add_argument("--min-len", type=int, default=24, help="minimum normalized unit length")
+    parser.add_argument("--fuzzy", action="store_true", help="also run slower fuzzy comparisons")
+    parser.add_argument("--report", help="write the same report text to this path")
+    args = parser.parse_args(argv)
+
+    if args.min_len < 1:
+        print("ERROR: --min-len must be >= 1", file=sys.stderr)
+        return 2
+
+    try:
+        report, total_matches = build_report(args)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    print(report)
+    if args.report:
+        report_path = expand_path(args.report)
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(report + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"ERROR: cannot write report {report_path}: {exc}", file=sys.stderr)
+            return 2
+
+    return 1 if total_matches else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

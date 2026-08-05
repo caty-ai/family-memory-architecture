@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Post create-once family-hot events into the Agent A-side hot inbox.
+
+This script only writes one immutable JSON event file. It does not generate
+00_index/family-hot.md, register hooks, or mutate any existing inbox file.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import unicodedata
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+DEFAULT_INBOX_DIR = "~/family-vault/00_index/hot-inbox/"
+SCHEMA_VERSION = "family-hot-event/v0"
+KIND_CLASS_DEFAULTS = {
+    "decision": 5,
+    "project": 6,
+    "blocker": 6,
+    "caution": 9,
+}
+KIND_CLASS_ALLOWED = {
+    "decision": {5},
+    "project": {2, 3, 6},
+    "blocker": {4, 6, 10},
+    "caution": {9},
+}
+EVENT_ID_RE = re.compile(
+    r"^\d{8}T\d{6}Z__[A-Za-z0-9_-]+__(decision|project|blocker|caution|expire)__[A-Za-z0-9-]+__[0-9a-f]{8}$"
+)
+FREEZE_RE = re.compile(r"freeze|frozen|do not touch|don'?t touch|凍結|触らない|触るな", re.IGNORECASE)
+# Best-effort denylist scan; this is not an exhaustive or guaranteed secret detector.
+# Keep in sync with family-hot-generate and family-hot-lint (audit F4).
+SECRET_PATTERNS = [
+    re.compile(pattern)
+    for pattern in (
+        # lookbehind: task-management / risk-analysis must not match
+        r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}",
+        r"AKIA[0-9A-Z]{8,}",
+        r"ghp_[A-Za-z0-9]{8,}",
+        r"github_pat_[A-Za-z0-9_]{8,}",
+        r"AIza[A-Za-z0-9_-]{8,}",
+        r"xox[bap]-",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY",
+        r"Bearer [A-Za-z0-9._-]{16,}",
+    )
+]
+
+
+class HotInboxError(Exception):
+    """Raised when an event cannot be validated or written safely."""
+
+
+def die(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    return 2
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def utc_z(dt):
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def slugify(title, limit=40):
+    text = unicodedata.normalize("NFKD", title)
+    text = text.encode("ascii", "ignore").decode("ascii").lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    if len(text) > limit:
+        trimmed = text[:limit].rstrip("-")
+        if "-" in trimmed:
+            trimmed = trimmed.rsplit("-", 1)[0]
+        text = trimmed or text[:limit].strip("-")
+    return text or "event"
+
+
+def parse_iso_datetime(value, field_name):
+    try:
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HotInboxError(f"{field_name} must be an ISO8601 datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def validate_filename_part(value, field_name):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise HotInboxError(f"{field_name} must contain only letters, digits, underscore, or hyphen")
+
+
+def build_event_id(created_at, agent, kind, title, uuid8=None):
+    validate_filename_part(agent, "--agent")
+    uuid_text = uuid8 if uuid8 is not None else uuid.uuid4().hex[:8]
+    if not re.fullmatch(r"[0-9a-f]{8}", uuid_text):
+        raise HotInboxError("uuid8 must be 8 lowercase hex characters")
+    stamp = created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}__{agent}__{kind}__{slugify(title)}__{uuid_text}"
+
+
+def iter_string_fields(value, field_name=""):
+    if isinstance(value, str):
+        yield field_name or "$", value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            child_name = f"{field_name}.{key_text}" if field_name else key_text
+            # dict keys are scannable text too — a secret used as a key must not slip through
+            yield f"{child_name} (key)", key_text
+            yield from iter_string_fields(item, child_name)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            child_name = f"{field_name}[{index}]" if field_name else f"[{index}]"
+            yield from iter_string_fields(item, child_name)
+
+
+def scan_secrets(event):
+    for scan_field, text in iter_string_fields(event):
+        for pattern in SECRET_PATTERNS:
+            if pattern.search(text):
+                raise HotInboxError(f"secret-like pattern detected in field {scan_field!r}")
+
+
+def normalized_relative_posix_path(path):
+    text = str(path).replace("\\", "/")
+    if text.startswith("/"):
+        return None
+    segments = [segment for segment in text.split("/") if segment and segment != "."]
+    if any(segment == ".." for segment in segments):
+        return None
+    return "/".join(segments)
+
+
+def is_family_vault_class_five_path(path):
+    normalized = normalized_relative_posix_path(path)
+    if not normalized:
+        return False
+    return normalized.startswith("family-vault/30_decisions/") or normalized.startswith("family-vault/20_projects/")
+
+
+def is_github_host(url):
+    hostname = urlsplit(url).hostname
+    if not hostname:
+        return False
+    hostname = hostname.lower()
+    return hostname == "github.com" or hostname.endswith(".github.com")
+
+
+def validate_class_five(args, class_num):
+    if class_num != 5:
+        return
+    path = args.canonical_path or ""
+    if is_family_vault_class_five_path(path):
+        return
+
+    missing = []
+    if not args.promotion_pending:
+        missing.append("--promotion-pending")
+    if not args.canonical_url or not is_github_host(args.canonical_url):
+        missing.append("--canonical-url with github.com host")
+    if missing:
+        raise HotInboxError(
+            "class 5 without Family Vault family-vault/30_decisions/ or family-vault/20_projects/ canonical path "
+            f"requires {', '.join(missing)}"
+        )
+
+
+def validate_kind_class(kind, class_num):
+    allowed = KIND_CLASS_ALLOWED.get(kind)
+    if allowed is None or class_num not in allowed:
+        allowed_text = ", ".join(str(value) for value in sorted(allowed or [])) or "none"
+        raise HotInboxError(f"kind {kind} is not valid for class {class_num}; allowed classes: {allowed_text}")
+
+
+def validate_class_nine(args, class_num, now):
+    if class_num != 9:
+        return None
+
+    if args.expires_at:
+        parsed_expires_at = parse_iso_datetime(args.expires_at, "--expires-at")
+        if parsed_expires_at <= now:
+            raise HotInboxError("--expires-at must be in the future")
+        if parsed_expires_at - now > timedelta(days=14):
+            raise HotInboxError("--expires-at must be no more than 14 days from posting time (= created_at) for class 9")
+        return utc_z(parsed_expires_at)
+
+    title = args.title or ""
+    summary = args.summary or ""
+    freeze_matched = FREEZE_RE.search(title) or FREEZE_RE.search(summary)
+    ttl_days = 3 if freeze_matched else 7
+    expires_at = utc_z(now + timedelta(days=ttl_days))
+    subject = "caution" if args.kind == "caution" else "class 9"
+    reason = "freeze pattern matched" if freeze_matched else "standard default"
+    print(
+        f"note: --expires-at omitted for {subject}; defaulting to {ttl_days} days from now ({reason})",
+        file=sys.stderr,
+    )
+    return expires_at
+
+
+def build_event(args, now=None, uuid8=None):
+    now = now or datetime.now(timezone.utc)
+    if args.kind != "expire" and (not args.title or not args.title.strip()):
+        raise HotInboxError("non-expire events require --title")
+    if args.kind == "expire" and not args.target_event_id:
+        raise HotInboxError("expire events require --target-event-id")
+    if args.kind == "expire" and not EVENT_ID_RE.fullmatch(args.target_event_id):
+        raise HotInboxError(
+            "--target-event-id does not match event_id shape (YYYYMMDDTHHMMSSZ__agent__kind__slug__uuid8)"
+        )
+    title_for_filename = args.title if args.kind != "expire" else args.target_event_id or "expire"
+    event_id = build_event_id(now, args.agent, args.kind, title_for_filename, uuid8=uuid8)
+    created_at = utc_z(now)
+
+    if args.kind == "expire":
+        event = {
+            "schema_version": SCHEMA_VERSION,
+            "event_id": event_id,
+            "created_at": created_at,
+            "created_by": args.agent,
+            "kind": "expire",
+            "target_event_id": args.target_event_id,
+        }
+        scan_secrets(event)
+        return event
+
+    if not args.summary or not args.summary.strip():
+        raise HotInboxError("non-expire events require --summary")
+    if not args.canonical_url and not args.canonical_path:
+        raise HotInboxError("every item needs a canonical pointer: pass --canonical-url or --canonical-path")
+
+    class_num = args.class_num if args.class_num is not None else KIND_CLASS_DEFAULTS[args.kind]
+    validate_kind_class(args.kind, class_num)
+    validate_class_five(args, class_num)
+    expires_at = validate_class_nine(args, class_num, now)
+
+    if class_num != 9 and args.expires_at:
+        parsed_expires_at = parse_iso_datetime(args.expires_at, "--expires-at")
+        if parsed_expires_at <= now:
+            raise HotInboxError("--expires-at must be in the future")
+        if parsed_expires_at - now > timedelta(days=30):
+            raise HotInboxError("--expires-at must be no more than 30 days from posting time (= created_at)")
+        expires_at = utc_z(parsed_expires_at)
+
+    event = {
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "created_at": created_at,
+        "created_by": args.agent,
+        "class": class_num,
+        "kind": args.kind,
+        "title": args.title,
+        "summary": args.summary,
+        "owner": args.owner,
+        "priority": args.priority,
+        "promotion_pending": bool(args.promotion_pending),
+        "related": args.related or [],
+    }
+    if args.canonical_url:
+        event["canonical_url"] = args.canonical_url
+    if args.canonical_path:
+        event["canonical_path"] = args.canonical_path
+    if expires_at:
+        event["expires_at"] = expires_at
+
+    scan_secrets(event)
+    return event
+
+
+def write_event_file(inbox_dir, event):
+    inbox_path = expand_path(inbox_dir)
+    destination = inbox_path / f"{event['event_id']}.json"
+    try:
+        inbox_path.mkdir(parents=True, exist_ok=True)
+        with open(destination, "x", encoding="utf-8") as handle:
+            json.dump(event, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+    except FileExistsError as exc:
+        raise HotInboxError(f"inbox event already exists, refusing to overwrite: {destination}") from exc
+    except OSError as exc:
+        raise HotInboxError(f"cannot write inbox event {destination}: {exc}") from exc
+    return destination.resolve()
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Create one immutable family-hot inbox event.")
+    parser.add_argument("--kind", required=True, choices=("decision", "project", "blocker", "caution", "expire"))
+    parser.add_argument("--title")
+    parser.add_argument("--summary")
+    parser.add_argument("--canonical-url")
+    parser.add_argument("--canonical-path")
+    parser.add_argument("--owner", default="agent-a")
+    parser.add_argument("--priority", choices=("P0", "P1", "P2"), default="P2")
+    parser.add_argument("--expires-at")
+    parser.add_argument("--related", action="append", default=[])
+    parser.add_argument("--class-num", type=int)
+    parser.add_argument("--target-event-id")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--promotion-pending", action="store_true")
+    parser.add_argument("--agent", default="agent-a")
+    parser.add_argument(
+        "--inbox-dir",
+        default=os.environ.get("FAMILY_HOT_INBOX", DEFAULT_INBOX_DIR),
+        help="hot inbox directory",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        event = build_event(args)
+        if args.dry_run:
+            print(json.dumps(event, indent=2, ensure_ascii=False))
+            return 0
+        destination = write_event_file(args.inbox_dir, event)
+    except HotInboxError as exc:
+        return die(str(exc))
+
+    print(destination)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

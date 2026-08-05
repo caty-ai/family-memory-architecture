@@ -1,0 +1,52 @@
+# Injection-surface contract for one OpenClaw agent — worked example.
+# Inventory should be verified live against the agent's workspace before
+# freezing caps (wc -m baseline; lint measures chars).
+#
+# Remote agents: add `host: <user>@<private-ip>` (ssh target; lint reads files
+# over ssh with BatchMode key auth) and set workspace to the remote path.
+# This example is a local-host manifest, so `host` is omitted.
+
+agent: agent-g
+platform: openclaw            # caps come from platform-caps.yaml
+workspace: ~/.openclaw/workspace
+
+files:
+  - path: AGENTS.md
+    role: agents              # ops rules only; playbook pointers, no persona
+    max_chars: 5000           # self-growth guardrail: AGENTS ≤5KB + pointers
+  - path: SOUL.md
+    role: soul
+    max_chars: 4000
+  - path: IDENTITY.md
+    role: identity
+    max_chars: 4000
+  - path: USER.md
+    role: user
+    max_chars: 2000
+  - path: TOOLS.md
+    role: tools
+    max_chars: 8000
+  - path: MEMORY.md
+    role: memory
+    max_chars: 11000          # deliberately under context_per_file_chars=12000
+    note: "the platform silently truncates at the 12k runtime cut; cap chosen below it"
+  - path: HEARTBEAT.md
+    role: heartbeat
+    max_chars: 2000
+  - path: shared/vision/AGENTS.md
+    role: shared-vision       # hook-injected each session
+    max_chars: 6000
+    shared: true              # single source for all OpenClaw agents — alert only, never per-agent edited
+
+# rot check (v1: check ① only — expired "(as of YYYY-MM-DD)" facts)
+rot:
+  as_of_ttl_days: 90
+  applies_to_roles: [memory, tools]   # persona files change slowly; start narrow
+
+# notification policy (v1 ops definition)
+report:
+  channel: hot-inbox          # TIMESTAMP__<owner>__lint-report__... JSON event
+  also: state-file            # ~/.claude/state/injection-lint/<agent>-latest.json
+  fail_threshold: 1           # any budget breach or >=80% cap warning -> alert
+  alert_owner: agent-a        # the memory steward triages and proposes fixes to the agent's owner; never auto-edits
+  stale_alert_days: 7         # unresolved alerts re-raised weekly by watchdog cycle

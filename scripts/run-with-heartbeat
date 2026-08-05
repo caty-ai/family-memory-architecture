@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# run-with-heartbeat — run a command and record a standard fma job heartbeat.
+#
+# Usage: run-with-heartbeat <job-name> -- <command> [args...]
+#
+# Wraps any cron/launchd job so the watchdog can observe it without touching
+# the job itself (fma #31): the wrapped command runs with the caller's exact
+# environment and stdio, then an ok/fail heartbeat is written via
+# scripts/job-heartbeat (heartbeat dir from FMA_HEARTBEAT_DIR). The wrapped
+# command's exit code is passed through unchanged; a heartbeat-write failure
+# is reported on stderr but never masks or alters that exit code.
+#
+# Deliberately no `set -e`: the command's failure must reach the fail
+# heartbeat, not kill the wrapper first.
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+usage() {
+  echo "usage: run-with-heartbeat <job-name> -- <command> [args...]" >&2
+  exit 64
+}
+
+JOB="${1:-}"
+[[ -n "$JOB" && "${2:-}" == "--" && $# -ge 3 ]] || usage
+shift 2
+
+START_MS=$(( $(date +%s) * 1000 ))
+
+# Run the command as a monitored child so a signal aimed at the wrapper
+# (reboot/TERM) still forwards to the job, gets a fail heartbeat recorded,
+# and exits 128+sig — instead of the wrapper dying heartbeat-less with the
+# child left running. `<&0` re-attaches the caller's stdin (bash redirects
+# background children from /dev/null by default).
+CHILD_PID=""
+# Group kill so grandchildren (e.g. `bash -c 'long-task'`) terminate too;
+# job control (set -m) gives the child its own process group.
+forward_signal() {
+  [[ -n "$CHILD_PID" ]] || return 0
+  kill -"$1" -- "-$CHILD_PID" 2>/dev/null || kill -"$1" "$CHILD_PID" 2>/dev/null
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+set -m
+"$@" <&0 &
+CHILD_PID=$!
+set +m
+rc=0
+while :; do
+  if wait "$CHILD_PID"; then rc=0; else rc=$?; fi
+  # wait returns 128+sig when our own trap interrupts it; loop until the
+  # child has actually exited so rc is the child's real status.
+  kill -0 "$CHILD_PID" 2>/dev/null || break
+done
+trap - TERM INT HUP
+
+DURATION_MS=$(( $(date +%s) * 1000 - START_MS ))
+
+if [[ $rc -eq 0 ]]; then
+  python3 "$SCRIPT_DIR/job-heartbeat" "$JOB" ok --duration-ms "$DURATION_MS" \
+    || echo "run-with-heartbeat: heartbeat write failed for $JOB (job rc=0)" >&2
+else
+  python3 "$SCRIPT_DIR/job-heartbeat" "$JOB" fail --reason "command exited rc=$rc" --duration-ms "$DURATION_MS" \
+    || echo "run-with-heartbeat: heartbeat write failed for $JOB (job rc=$rc)" >&2
+fi
+exit $rc

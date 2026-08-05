@@ -1,0 +1,661 @@
+#!/usr/bin/env python3
+"""Manifest-driven watchdog for automation job heartbeats."""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lib_atomic
+
+
+DEFAULT_HEARTBEAT_DIR = "~/.claude/state/heartbeats"
+DEFAULT_TELEGRAM_ENV = "~/.config/fma/telegram.env"
+HEARTBEAT_SCHEMA_VERSION = "job-heartbeat/v1"
+PAUSE_SCHEMA_VERSION = "watchdog-pause/v1"
+PAUSE_DIR = ".paused"
+REQUIRED_HEARTBEAT_KEYS = {"job", "last_run", "status", "fail_count", "duration_ms", "docs"}
+REQUIRED_JOB_KEYS = {"id", "desc", "host", "owner", "period_hours", "heartbeat", "alert"}
+# desktop heartbeats are pulled over ssh by the invoking wrapper; watchdog
+# reads them from the local heartbeat dir like any other host.
+ALLOWED_HOSTS = {"laptop", "desktop", "server"}
+ALLOWED_OWNERS = {"agent-a", "agent-b", "agent-c", "agent-d", "agent-e", "agent-f", "agent-g"}
+ALLOWED_ALERTS = {"stderr", "notify", "inbox"}
+
+
+class WatchdogError(Exception):
+    """Raised for internal watchdog errors."""
+
+
+class ManifestError(WatchdogError):
+    """Raised when jobs.yaml cannot be parsed."""
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def default_manifest_path():
+    return Path(__file__).resolve().parents[1] / "manifests" / "jobs.yaml"
+
+
+def strip_comment(line):
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
+def parse_scalar(value, line_number):
+    value = value.strip()
+    if value == "" or value == "null":
+        return None
+    if value in {"true", "false"}:
+        return value == "true"
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        if len(value) < 2 or value[-1] != quote:
+            raise ManifestError(f"line {line_number}: unterminated quoted string")
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        body = value[1:-1].strip()
+        if not body:
+            return []
+        return [parse_scalar(item.strip(), line_number) for item in body.split(",")]
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    return value
+
+
+def parse_key_value(text, line_number):
+    if ":" not in text:
+        raise ManifestError(f"line {line_number}: expected key: value")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        raise ManifestError(f"line {line_number}: invalid key {key!r}")
+    return key, value
+
+
+def parse_manifest(path):
+    try:
+        raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as exc:
+        raise ManifestError(f"cannot read manifest {path}: {exc}") from exc
+
+    data = {"jobs": []}
+    section = None
+    current_job = None
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        if "\t" in raw_line:
+            raise ManifestError(f"line {line_number}: tabs are not allowed")
+        line = strip_comment(raw_line)
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            key, value = parse_key_value(line, line_number)
+            section = key if value.strip() == "" and key == "jobs" else None
+            if value.strip():
+                data[key] = parse_scalar(value, line_number)
+            elif key not in data:
+                data[key] = []
+            current_job = None
+            continue
+        if section == "jobs":
+            if line.startswith("  - "):
+                current_job = {}
+                data["jobs"].append(current_job)
+                key, value = parse_key_value(line[4:], line_number)
+                current_job[key] = parse_scalar(value, line_number)
+                continue
+            if line.startswith("    ") and current_job is not None and not line.startswith("      "):
+                key, value = parse_key_value(line[4:], line_number)
+                current_job[key] = parse_scalar(value, line_number)
+                continue
+        raise ManifestError(f"line {line_number}: unsupported manifest shape")
+    if not isinstance(data.get("jobs"), list):
+        raise ManifestError("jobs must be a list")
+    validate_manifest(data)
+    return data
+
+
+def validate_manifest(data):
+    for index, job in enumerate(data.get("jobs", []), 1):
+        if not isinstance(job, dict):
+            raise ManifestError(f"job {index}: must be a mapping")
+        missing = sorted(REQUIRED_JOB_KEYS - set(job))
+        if missing:
+            raise ManifestError(f"job {index}: missing required field(s): {', '.join(missing)}")
+        if not isinstance(job["id"], str) or not job["id"].strip():
+            raise ManifestError(f"job {index}: id must be a non-empty string")
+        if not isinstance(job["desc"], str) or not job["desc"].strip():
+            raise ManifestError(f"job {job['id']}: desc must be a non-empty string")
+        if job["host"] not in ALLOWED_HOSTS:
+            raise ManifestError(f"job {job['id']}: host must be one of {sorted(ALLOWED_HOSTS)}")
+        if job["owner"] not in ALLOWED_OWNERS:
+            raise ManifestError(f"job {job['id']}: owner must be one of {sorted(ALLOWED_OWNERS)}")
+        if job["period_hours"] is not None and not isinstance(job["period_hours"], (int, float)):
+            raise ManifestError(f"job {job['id']}: period_hours must be numeric or null")
+        if not safe_heartbeat_filename(job["heartbeat"]):
+            raise ManifestError(f"job {job['id']}: heartbeat must be a filename")
+        alerts = job["alert"]
+        if not isinstance(alerts, list) or not alerts:
+            raise ManifestError(f"job {job['id']}: alert must be a non-empty list")
+        unknown_alerts = sorted(set(alerts) - ALLOWED_ALERTS)
+        if unknown_alerts:
+            raise ManifestError(f"job {job['id']}: unsupported alert route(s): {', '.join(unknown_alerts)}")
+        if "exempt" in job and not isinstance(job["exempt"], bool):
+            raise ManifestError(f"job {job['id']}: exempt must be true or false")
+
+
+def parse_iso_utc(value):
+    normalized = value.replace("Z", "+00:00") if isinstance(value, str) and value.endswith("Z") else value
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def safe_heartbeat_filename(name):
+    if not isinstance(name, str) or not name:
+        return False
+    if name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    return Path(name).name == name
+
+
+def pause_marker_path(heartbeat_dir, heartbeat_name):
+    return heartbeat_dir / PAUSE_DIR / f"{heartbeat_name}.pause.json"
+
+
+def pause_marker_present(marker_path):
+    return marker_path.exists() or marker_path.is_symlink()
+
+
+def paused_result(job, marker_path):
+    job_id = job.get("id")
+    if marker_path.is_symlink():
+        return {
+            "id": job_id,
+            "status": "paused",
+            "reason_code": "corrupt",
+            "reason": "corrupt pause marker; explicit re-arm required",
+        }
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {
+            "id": job_id,
+            "status": "paused",
+            "reason_code": "corrupt",
+            "reason": "corrupt pause marker; explicit re-arm required",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "id": job_id,
+            "status": "paused",
+            "reason_code": "corrupt",
+            "reason": "corrupt pause marker; explicit re-arm required",
+        }
+    if payload.get("schema_version") != PAUSE_SCHEMA_VERSION:
+        return {
+            "id": job_id,
+            "status": "paused",
+            "reason_code": "unknown-version",
+            "reason": "unknown pause marker schema version; explicit re-arm required",
+        }
+    return {
+        "id": job_id,
+        "status": "paused",
+        "reason_code": payload.get("reason_code", "corrupt"),
+        "reason": payload.get("reason", "operator pause; explicit re-arm required"),
+    }
+
+
+def mark_paused(job, heartbeat_dir, reason_code, reason):
+    marker_path = pause_marker_path(heartbeat_dir, job["heartbeat"])
+    if not pause_marker_present(marker_path):
+        lib_atomic.atomic_write_json(
+            marker_path,
+            {
+                "schema_version": PAUSE_SCHEMA_VERSION,
+                "job": job["id"],
+                "heartbeat": job["heartbeat"],
+                "reason_code": reason_code,
+                "reason": reason,
+                "paused_at": utc_now_iso(),
+            },
+        )
+    return paused_result(job, marker_path)
+
+
+def resume_jobs(manifest, heartbeat_dir, job_ids, host):
+    jobs_by_id = {job["id"]: job for job in manifest.get("jobs", [])}
+    requested_jobs = []
+    for job_id in job_ids:
+        job = jobs_by_id.get(job_id)
+        if job is None:
+            raise WatchdogError(f"cannot re-arm unknown job {job_id!r}")
+        if job.get("host") != host:
+            raise WatchdogError(f"cannot re-arm {job_id!r} from host {host!r}; run with --host {job.get('host')!r}")
+        requested_jobs.append((job_id, job))
+
+    for job_id, job in requested_jobs:
+        marker_path = pause_marker_path(heartbeat_dir, job["heartbeat"])
+        try:
+            marker_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise WatchdogError(f"cannot re-arm {job_id}: {exc}") from exc
+        print(f"{job_id}: re-armed")
+        check_job(job, heartbeat_dir, datetime.now(timezone.utc))
+
+
+def read_fail_count(path):
+    try:
+        if path.exists():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            return int(previous.get("fail_count", 0))
+    except (OSError, ValueError, TypeError):
+        return 0
+    return 0
+
+
+def write_heartbeat(path, job, status, reason, docs, duration_ms):
+    fail_count = read_fail_count(path)
+    fail_count = 0 if status == "ok" else fail_count + 1
+    payload = {
+        "job": job,
+        "last_run": utc_now_iso(),
+        "status": status,
+        "fail_count": fail_count,
+        "duration_ms": int(duration_ms),
+        "docs": int(docs),
+    }
+    if status == "fail":
+        payload["reason"] = (reason or "failed")[:300]
+    lib_atomic.atomic_write_json(path, payload)
+
+
+def check_job(job, heartbeat_dir, now):
+    heartbeat_name = job.get("heartbeat")
+    if not safe_heartbeat_filename(heartbeat_name):
+        return {"id": job.get("id", "<unknown>"), "status": "alert", "reason": "invalid heartbeat filename"}
+    path = heartbeat_dir / heartbeat_name
+    marker_path = pause_marker_path(heartbeat_dir, heartbeat_name)
+    if pause_marker_present(marker_path):
+        return paused_result(job, marker_path)
+    if not path.exists():
+        return {"id": job.get("id"), "status": "alert", "reason": "heartbeat missing"}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: unreadable")
+    except UnicodeError:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: invalid UTF-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return mark_paused(
+            job,
+            heartbeat_dir,
+            "corrupt",
+            "corrupt heartbeat: invalid JSON",
+        )
+    if not isinstance(payload, dict):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: expected JSON object")
+    schema_version = payload.get("schema_version")
+    if schema_version not in (None, HEARTBEAT_SCHEMA_VERSION):
+        return mark_paused(
+            job,
+            heartbeat_dir,
+            "unknown-version",
+            "unknown heartbeat schema version",
+        )
+    missing = sorted(REQUIRED_HEARTBEAT_KEYS - set(payload))
+    if missing:
+        return mark_paused(
+            job,
+            heartbeat_dir,
+            "missing-required-field",
+            f"heartbeat missing required field(s): {', '.join(missing)}",
+        )
+    if payload["job"] != job.get("id"):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: job field mismatch")
+    if not isinstance(payload["status"], str) or payload["status"] not in {"ok", "fail"}:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: invalid status")
+    if not isinstance(payload["fail_count"], int) or isinstance(payload["fail_count"], bool):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: fail_count must be an integer")
+    if payload["fail_count"] < 0:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: fail_count must be non-negative")
+    if not isinstance(payload["duration_ms"], int) or isinstance(payload["duration_ms"], bool):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: duration_ms must be an integer")
+    if payload["duration_ms"] < 0:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: duration_ms must be non-negative")
+    if not isinstance(payload["docs"], int) or isinstance(payload["docs"], bool):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: docs must be an integer")
+    if payload["docs"] < 0:
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: docs must be non-negative")
+    try:
+        last_run = parse_iso_utc(payload["last_run"])
+    except (ValueError, TypeError, OverflowError):
+        return mark_paused(job, heartbeat_dir, "corrupt", "corrupt heartbeat: invalid last_run")
+    fail_count = payload["fail_count"]
+
+    period_hours = job.get("period_hours")
+    if isinstance(period_hours, (int, float)) and now - last_run > timedelta(hours=float(period_hours) * 2):
+        return {
+            "id": job.get("id"),
+            "status": "alert",
+            "category": "stale",
+            "reason": "heartbeat stale",
+        }
+    if payload.get("status") == "fail" and fail_count >= 3:
+        return {"id": job.get("id"), "status": "alert", "reason": f"fail_count {fail_count}"}
+    return {"id": job.get("id"), "status": "ok"}
+
+
+def alert_summary(alerts):
+    ids = [item.get("id", "unknown") for item in alerts]
+    shown = ids[:5]
+    if len(ids) > 5:
+        shown.append(f"+{len(ids) - 5} more")
+    paused = sum(item.get("status") == "paused" for item in alerts)
+    stale = sum(item.get("category") == "stale" for item in alerts)
+    return (
+        f"{len(ids)} job(s) alerting ({paused} paused, {stale} stale):"
+        f" {', '.join(shown)}"
+    )
+
+
+def applescript_quote(text):
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def maybe_notify(alerts):
+    if not alerts or sys.platform != "darwin":
+        return
+    summary = alert_summary(alerts)
+    script = f'display notification "{applescript_quote(summary)}" with title "watchdog"'
+    try:
+        result = subprocess.run(["osascript", "-e", script], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+        if result.returncode != 0:
+            print(f"warning: osascript notification failed: {result.stderr.strip()}", file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: osascript notification failed: {exc}", file=sys.stderr)
+
+
+def load_telegram_config():
+    """Read TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from the telegram env file.
+
+    Absent file = telegram deliberately unconfigured on this host (silent skip).
+    Present-but-incomplete file is a misconfiguration worth a stderr warning.
+    """
+    path = Path(os.environ.get("FMA_TELEGRAM_ENV") or DEFAULT_TELEGRAM_ENV).expanduser()
+    if not path.is_file():
+        return None
+    config = {}
+    try:
+        # Deliberately minimal KEY=VALUE format: no `export` prefix, no inline comments.
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip()
+            # Unquote only a matched pair; mismatched quotes are kept verbatim.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            config[key.strip()] = value
+    except (OSError, ValueError) as exc:  # ValueError covers UnicodeDecodeError
+        print(f"warning: telegram env unreadable: {exc}", file=sys.stderr)
+        return None
+    token = config.get("TELEGRAM_BOT_TOKEN")
+    chat_id = config.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print(f"warning: {path} missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID; telegram alert skipped", file=sys.stderr)
+        return None
+    return token, chat_id
+
+
+def maybe_telegram(alerts, host):
+    """Best-effort Telegram alert. The whole body is guarded: a failure anywhere
+    (config, message build, network, response parse) must never escape into
+    run() and alter the watchdog exit code, and the token must never reach logs."""
+    if not alerts:
+        return
+    token = None
+    try:
+        config = load_telegram_config()
+        if config is None:
+            return
+        token, chat_id = config
+        lines = [f"⚠️ watchdog[{host}]: {alert_summary(alerts)}"]
+        lines.extend(
+            f"- {item.get('id', 'unknown')}: {item.get('reason', 'unknown')}"
+            for item in alerts[:5]
+        )
+        body = urllib.parse.urlencode(
+            {"chat_id": chat_id, "text": "\n".join(lines), "disable_web_page_preview": "true"}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=body
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not payload.get("ok"):
+            description = str(payload.get("description")).replace(token, "<token>")
+            print(
+                f"warning: telegram alert rejected: {payload.get('error_code')} {description}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001 — alerting must never alter the watchdog outcome
+        detail = str(exc)
+        if token:
+            detail = detail.replace(token, "<token>")
+        print(f"warning: telegram alert failed: {type(exc).__name__}: {detail}", file=sys.stderr)
+
+
+def maybe_inbox_post(alerts):
+    if not alerts:
+        return
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "hot-inbox-post"
+    ids = [item["id"] for item in alerts]
+    names = ", ".join(ids[:5])
+    if len(ids) > 5:
+        names = f"{names}, +{len(ids) - 5} more"
+    title = f"watchdog: {len(alerts)} job(s) alerting"
+    summary = f"{len(alerts)} alert(s): {names}"
+    try:
+        result = subprocess.run(
+            [
+                str(script),
+                "--kind",
+                "caution",
+                "--owner",
+                "agent-a",
+                "--priority",
+                "P2",
+                "--agent",
+                "watchdog",
+                "--summary",
+                summary,
+                "--title",
+                title,
+                "--canonical-path",
+                "docs/jobs-framework.md",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"warning: hot-inbox-post failed: {result.stderr.strip() or result.stdout.strip()}", file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: hot-inbox-post failed: {exc}", file=sys.stderr)
+
+
+def emit_output(args, checked_at, jobs):
+    alerts = [job for job in jobs if job["status"] in {"alert", "paused"}]
+    paused_count = sum(job["status"] == "paused" for job in alerts)
+    stale_count = sum(job.get("category") == "stale" for job in alerts)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "host": args.host,
+                    "checked_at": checked_at,
+                    "jobs": jobs,
+                    "alert_count": len(alerts),
+                    "paused_count": paused_count,
+                    "stale_count": stale_count,
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    ok_count = 0
+    for job in jobs:
+        if job["status"] == "ok":
+            ok_count += 1
+            print(f"{job['id']}: ok")
+        elif job["status"] == "exempt":
+            print(f"{job['id']}: skipped (exempt)")
+        elif job["status"] == "paused":
+            print(f"{job['id']}: PAUSED ({job['reason']})")
+        else:
+            print(f"{job['id']}: ALERT ({job['reason']})")
+    print(
+        f"{ok_count} ok, {len(alerts)} alert"
+        f" ({stale_count} stale, {paused_count} paused)"
+    )
+
+
+def public_result(result):
+    return {key: value for key, value in result.items() if key != "_alert_routes"}
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Check registered job heartbeats.")
+    parser.add_argument("--jobs-manifest", default=str(default_manifest_path()))
+    parser.add_argument("--heartbeat-dir")
+    parser.add_argument("--host", choices=("laptop", "desktop", "server"), default="laptop")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--notify", action="store_true")
+    parser.add_argument("--inbox-post", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="append",
+        default=[],
+        metavar="JOB_ID",
+        help="explicitly remove JOB_ID's persistent pause marker before checking",
+    )
+    return parser.parse_args(argv)
+
+
+def run(args):
+    heartbeat_dir = expand_path(args.heartbeat_dir or os.environ.get("FMA_HEARTBEAT_DIR") or DEFAULT_HEARTBEAT_DIR)
+    heartbeat_dir.mkdir(parents=True, exist_ok=True)
+    manifest = parse_manifest(Path(args.jobs_manifest))
+    resume_jobs(manifest, heartbeat_dir, args.resume, args.host)
+    now = datetime.now(timezone.utc)
+    checked_at = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    results = []
+    for job in manifest.get("jobs", []):
+        if job.get("host") != args.host:
+            continue
+        if job.get("exempt") is True:
+            result = {"id": job.get("id"), "status": "exempt", "reason": "exempt"}
+            result["_alert_routes"] = job.get("alert", [])
+            results.append(result)
+            continue
+        result = check_job(job, heartbeat_dir, now)
+        result["_alert_routes"] = job.get("alert", [])
+        results.append(result)
+    alerts = [item for item in results if item["status"] in {"alert", "paused"}]
+    public_results = [public_result(item) for item in results]
+    emit_output(args, checked_at, public_results)
+    if args.notify:
+        notify_alerts = [public_result(item) for item in alerts if "notify" in item.get("_alert_routes", [])]
+        maybe_notify(notify_alerts)
+        maybe_telegram(notify_alerts, args.host)
+    if args.inbox_post:
+        maybe_inbox_post([public_result(item) for item in alerts if "inbox" in item.get("_alert_routes", [])])
+    return 2 if alerts else 0, heartbeat_dir, None
+
+
+def main(argv=None):
+    started = time.monotonic()
+    args = parse_args(argv)
+    heartbeat_dir = expand_path(args.heartbeat_dir or os.environ.get("FMA_HEARTBEAT_DIR") or DEFAULT_HEARTBEAT_DIR)
+    code = 1
+    reason = None
+    try:
+        code, heartbeat_dir, reason = run(args)
+    except WatchdogError as exc:
+        reason = str(exc)
+        print(f"watchdog: {reason}", file=sys.stderr)
+        code = 1
+    except OSError as exc:
+        reason = str(exc)
+        print(f"watchdog: {reason}", file=sys.stderr)
+        code = 1
+    finally:
+        status = "fail" if code == 1 else "ok"
+        self_id = f"watchdog-{args.host}"
+        # Recursion is intentional: this run writes watchdog-<host>.json, and the
+        # next watchdog run for that host monitors it through jobs.yaml.
+        try:
+            self_heartbeat = f"{self_id}.json"
+            if not pause_marker_present(
+                pause_marker_path(heartbeat_dir, self_heartbeat)
+            ):
+                write_heartbeat(
+                    heartbeat_dir / self_heartbeat,
+                    self_id,
+                    status,
+                    reason,
+                    0,
+                    int((time.monotonic() - started) * 1000),
+                )
+        except OSError as exc:
+            print(f"warning: watchdog heartbeat write failed: {exc}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

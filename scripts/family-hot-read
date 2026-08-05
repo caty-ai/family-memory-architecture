@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Read generated family-hot content only when its checksum contract is valid.
+
+The body_sha256 interop contract is byte-exact:
+1. Open the file in 'rb' mode and read the full raw bytes, without text decoding or
+   universal-newline translation.
+2. Split those bytes with bytes.splitlines(keepends=True), preserving each stored
+   line terminator.
+3. Compute body_bytes = b"".join(lines[:1] + lines[2:]). In 0-index terms this
+   excludes lines[1]. In 1-index human terms this excludes line 2, the generator
+   metadata/checksum line, while keeping line 1 and every line from line 3 onward.
+4. hashlib.sha256(body_bytes).hexdigest() is compared to the body_sha256 value in
+   line 2.
+
+In --check mode, success writes the raw file bytes to stdout and exits 0. On
+integrity failure, no raw file bytes are emitted; the existing integrity_failure
+line is printed with plain print(), so it currently goes to stdout, then exits 2.
+If the file is missing, --check emits no stdout and exits 1.
+
+Default mode is hook-safe: missing or invalid generated content must not break a
+SessionStart hook.
+"""
+
+import argparse
+import hashlib
+import os
+import re
+import sys
+from pathlib import Path
+
+
+DEFAULT_HOT_PATH = "~/family-vault/00_index/family-hot.md"
+DEFAULT_FALLBACK_POINTER = "https://github.com/caty-ai/family-memory-architecture/blob/main/docs/family-hot-usage.md"
+GENERATED_MARKER = "<!-- GENERATED-FILE: family-hot.md; DO NOT EDIT BY HAND -->"
+# Strict exact matching is intentional under the fixed Issue #20 / Issue #5 interop contract.
+META_RE = re.compile(
+    r"^<!-- generator: .*; sources_sha256: [0-9a-f]{64}; body_sha256: ([0-9a-f]{64}) -->$"
+)
+SIZE_CAP_BYTES = 2048
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def compute_body_sha256(raw_bytes):
+    lines = raw_bytes.splitlines(keepends=True)
+    body_bytes = b"".join(lines[:1] + lines[2:])
+    return hashlib.sha256(body_bytes).hexdigest()
+
+
+def integrity_failure(reason, fallback_pointer):
+    print(f"[family-hot] integrity check failed ({reason}) — not injecting; fallback: {fallback_pointer}")
+
+
+def check_integrity(path):
+    try:
+        if path.stat().st_size > SIZE_CAP_BYTES:
+            return None, "size-exceeds-2048-bytes"
+        raw_bytes = path.read_bytes()
+    except OSError:
+        return None, "read-error"
+
+    if len(raw_bytes) > SIZE_CAP_BYTES:
+        return raw_bytes, "size-exceeds-2048-bytes"
+
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw_bytes, "malformed-marker"
+
+    lines = text.splitlines()
+    if not lines or lines[0] != GENERATED_MARKER:
+        return raw_bytes, "missing-marker"
+    if len(lines) < 2:
+        return raw_bytes, "malformed-meta-line"
+
+    match = META_RE.fullmatch(lines[1])
+    if not match:
+        return raw_bytes, "malformed-meta-line"
+
+    expected_body_sha256 = match.group(1)
+    actual_body_sha256 = compute_body_sha256(raw_bytes)
+    if actual_body_sha256.lower() != expected_body_sha256.lower():
+        return raw_bytes, "body-sha256-mismatch"
+
+    return raw_bytes, None
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Read generated family-hot.md if integrity checks pass.")
+    parser.add_argument("--path", default=os.environ.get("FAMILY_HOT_PATH", DEFAULT_HOT_PATH), help="family-hot.md path")
+    parser.add_argument("--fallback-pointer", default=DEFAULT_FALLBACK_POINTER)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--check", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    path = expand_path(args.path)
+    if not os.path.isfile(path):
+        if args.verbose:
+            print(f"note: family-hot.md not found at {path}", file=sys.stderr)
+        return 1 if args.check else 0
+
+    raw_bytes, failure_reason = check_integrity(path)
+    if failure_reason:
+        integrity_failure(failure_reason, args.fallback_pointer)
+        return 2 if args.check else 0
+
+    sys.stdout.buffer.write(raw_bytes)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

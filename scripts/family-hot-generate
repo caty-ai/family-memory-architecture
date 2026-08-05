@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+"""Generate 00_index/family-hot.md from create-once hot-inbox events.
+
+Default mode validates the inbox, renders family-hot.md, verifies the byte-level
+reader checksum contract, and atomically replaces the generated markdown plus
+ledger only after all blocking checks pass.
+
+`--dry-run` prints the would-be generated file to stdout and writes nothing.
+`--check` performs the same validation/render/self-check path, prints a short
+status line, and writes nothing.
+"""
+
+import argparse
+import grp
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+DEFAULT_VAULT_ROOT = "~/family-vault"
+SCHEMA_VERSION = "family-hot-event/v0"
+GENERATED_MARKER = "<!-- GENERATED-FILE: family-hot.md; DO NOT EDIT BY HAND -->"
+META_RE = re.compile(
+    r"^<!-- generator: .*; sources_sha256: [0-9a-f]{64}; body_sha256: ([0-9a-f]{64}) -->$"
+)
+SIZE_CAP_BYTES = 2048
+PINNED_FALLBACK_ID = "#4"
+GENERATOR_VERSION = "family-hot-generator v0"
+CLASS_CAPS = {2: 1, 3: 3, 4: 5, 5: 5, 6: 5, 9: 3, 10: 1}
+RENDER_CLASS_ORDER = (2, 3, 4, 5, 6, 9, 10)
+OVERFLOW_DROP_ORDER = tuple(reversed(RENDER_CLASS_ORDER))
+CLASS_TITLES = {
+    2: "Orientation headline",
+    3: "Active family-wide focus",
+    4: "Active blockers and asks",
+    5: "Recent decisions",
+    6: "Family-crossing projects and blockers",
+    9: "Operational cautions",
+    10: "Blocking metrics or lint state",
+}
+KIND_CLASS_ALLOWED = {
+    "decision": {5},
+    "project": {2, 3, 6},
+    "blocker": {4, 6, 10},
+    "caution": {9},
+}
+# Keep in sync with hot-inbox-post and family-hot-lint (audit F4).
+SECRET_PATTERNS = [
+    re.compile(pattern)
+    for pattern in (
+        # lookbehind: task-management / risk-analysis must not match
+        r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}",
+        r"AKIA[0-9A-Z]{8,}",
+        r"ghp_[A-Za-z0-9]{8,}",
+        r"github_pat_[A-Za-z0-9_]{8,}",
+        r"AIza[A-Za-z0-9_-]{8,}",
+        r"xox[bap]-",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY",
+        r"Bearer [A-Za-z0-9._-]{16,}",
+    )
+]
+EVENT_ID_RE = re.compile(
+    r"^\d{8}T\d{6}Z__[A-Za-z0-9_-]+__(decision|project|blocker|caution|expire)__[A-Za-z0-9-]+__[0-9a-f]{8}$"
+)
+FREEZE_RE = re.compile(r"freeze|frozen|do not touch|don'?t touch|凍結|触らない|触るな", re.IGNORECASE)
+
+
+class FamilyHotError(Exception):
+    """Raised for blocking generator failures."""
+
+
+def expand_path(path_text):
+    return Path(os.path.expandvars(os.path.expanduser(path_text)))
+
+
+def utc_z(dt):
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso_datetime(value, field_name):
+    try:
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+    except (AttributeError, ValueError) as exc:
+        raise FamilyHotError(f"{field_name} must be an ISO8601 datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def event_id_created_at(event_id):
+    try:
+        return datetime.strptime(event_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise FamilyHotError("event_id timestamp is malformed") from exc
+
+
+def compute_body_sha256(raw_bytes):
+    lines = raw_bytes.splitlines(keepends=True)
+    body_bytes = b"".join(lines[:1] + lines[2:])
+    return hashlib.sha256(body_bytes).hexdigest()
+
+
+def scan_secret_text(text, label):
+    for pattern in SECRET_PATTERNS:
+        if pattern.search(text):
+            raise FamilyHotError(f"secret-like pattern detected in {label}")
+
+
+def one_line(value):
+    return " ".join(str(value).split())
+
+
+def canonical_pointer(event):
+    return event.get("canonical_url") or event.get("canonical_path") or ""
+
+
+def effective_caution_expiry(event):
+    if event.get("expires_at"):
+        return parse_iso_datetime(event["expires_at"], "expires_at")
+    if FREEZE_RE.search(str(event.get("title", ""))) or FREEZE_RE.search(str(event.get("summary", ""))):
+        return event["created_at_dt"] + timedelta(days=3)
+    return event["created_at_dt"] + timedelta(days=7)
+
+
+def validate_event_shape(event, now):
+    if event.get("schema_version") != SCHEMA_VERSION:
+        raise FamilyHotError("bad schema_version")
+    for field in ("event_id", "created_at", "created_by", "kind"):
+        if not event.get(field):
+            raise FamilyHotError(f"missing required field {field}")
+    if not EVENT_ID_RE.fullmatch(event["event_id"]):
+        raise FamilyHotError("event_id does not match hot-inbox filename pattern")
+    event["created_at_dt"] = parse_iso_datetime(event["created_at"], "created_at")
+    if event_id_created_at(event["event_id"]) != event["created_at_dt"].replace(microsecond=0):
+        raise FamilyHotError("event_id timestamp does not match created_at")
+    if event["created_at_dt"] > now + timedelta(minutes=5):
+        raise FamilyHotError("created_at is more than 5 minutes in the future")
+
+    if event.get("kind") == "expire":
+        if not event.get("target_event_id"):
+            raise FamilyHotError("expire event missing target_event_id")
+        return
+
+    for field in ("class", "title", "summary"):
+        if field not in event or event.get(field) is None or not str(event[field]).strip():
+            raise FamilyHotError(f"missing required field {field}")
+    if not canonical_pointer(event):
+        raise FamilyHotError("missing canonical pointer")
+    try:
+        class_num = int(event["class"])
+    except (TypeError, ValueError) as exc:
+        raise FamilyHotError("class must be an integer") from exc
+    event["class"] = class_num
+    if class_num not in CLASS_CAPS:
+        raise FamilyHotError(f"class {class_num} is not renderable by family-hot")
+    allowed_classes = KIND_CLASS_ALLOWED.get(event["kind"])
+    if allowed_classes is None:
+        raise FamilyHotError(f"unsupported kind {event['kind']}")
+    if class_num not in allowed_classes:
+        raise FamilyHotError(f"kind {event['kind']} is not valid for class {class_num}")
+    if event.get("expires_at"):
+        parse_iso_datetime(event["expires_at"], "expires_at")
+    if event.get("next_review_at"):
+        parse_iso_datetime(event["next_review_at"], "next_review_at")
+
+
+def read_inbox_events(inbox_dir, now):
+    accepted = []
+    skipped = []
+    if not inbox_dir.exists():
+        return accepted, skipped
+    for path in sorted(inbox_dir.glob("*.json")):
+        raw = path.read_bytes()
+        file_hash = hashlib.sha256(raw).hexdigest()
+        try:
+            scan_secret_text(raw.decode("utf-8", errors="replace"), path.name)
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise FamilyHotError(f"malformed JSON: {exc}") from exc
+            if not isinstance(event, dict):
+                raise FamilyHotError("event JSON must be an object")
+            validate_event_shape(event, now)
+            if path.name != f"{event['event_id']}.json":
+                raise FamilyHotError("event_id does not match inbox filename")
+        except FamilyHotError as exc:
+            skipped.append((path, str(exc)))
+            print(f"skip {path.name}: {exc}", file=sys.stderr)
+            continue
+        accepted.append({"path": path, "raw": raw, "sha256": file_hash, "event": event})
+    return accepted, skipped
+
+
+def active_candidates(accepted, now):
+    expired_targets = {item["event"]["target_event_id"] for item in accepted if item["event"].get("kind") == "expire"}
+    candidates = []
+    for item in accepted:
+        event = item["event"]
+        if event.get("kind") == "expire" or event["event_id"] in expired_targets:
+            continue
+        if event["kind"] == "caution" and now > effective_caution_expiry(event):
+            continue
+        candidates.append(item)
+    return candidates
+
+
+def source_hash(accepted):
+    # Deterministic source manifest: sorted basename:filehash pairs plus pinned fallback.
+    lines = [f"{item['path'].name}:{item['sha256']}" for item in sorted(accepted, key=lambda entry: entry["path"].name)]
+    lines.append(f"pinned:{PINNED_FALLBACK_ID}")
+    return hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
+
+
+def render_item(event):
+    bits = [
+        f"ptr: {one_line(canonical_pointer(event))}",
+        f"o: {one_line(event.get('owner', 'unowned'))}",
+        f"p: {one_line(event.get('priority', 'P2'))}",
+        f"at: {one_line(event['created_at'])}",
+    ]
+    if event.get("promotion_pending"):
+        bits.append("pending: true")
+    if event.get("next_review_at"):
+        bits.append(f"review: {one_line(event['next_review_at'])}")
+    if event.get("expires_at"):
+        bits.append(f"exp: {one_line(event['expires_at'])}")
+    return (
+        f"- [class:{event['class']} id:{one_line(event['event_id'])}] "
+        f"{one_line(event['title'])} | {one_line(event['summary'])} | "
+        f"{'; '.join(bits)}"
+    )
+
+
+HEARTBEAT_STALE_HOURS = 26  # conservative single threshold; per-job periods stay in jobs.yaml
+
+
+def heartbeat_summary():
+    """Compact ok/fail/stale counts over FMA_HEARTBEAT_DIR for the footer (fma #31).
+
+    Returns None when the env var is unset (local runs, tests) so the footer
+    stays byte-identical for existing callers.
+    """
+    hb_dir = os.environ.get("FMA_HEARTBEAT_DIR")
+    if not hb_dir:
+        return None
+    directory = Path(hb_dir).expanduser()
+    if not directory.is_dir():
+        return None
+    ok = fail = stale = 0
+    now = datetime.now(timezone.utc)
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            fail += 1
+            continue
+        if not isinstance(data, dict):  # valid JSON but not a heartbeat object
+            fail += 1
+            continue
+        # Missing/unparseable/naive last_run counts as stale, not fail: the file is
+        # valid JSON (the job wrote *something*) but its freshness is unknowable.
+        is_stale = True
+        last_run = data.get("last_run")
+        if isinstance(last_run, str):
+            try:
+                ran_at = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+                if ran_at.tzinfo is not None:  # naive timestamps stay "stale"
+                    is_stale = (now - ran_at) > timedelta(hours=HEARTBEAT_STALE_HOURS)
+            except ValueError:
+                pass
+        if is_stale:
+            stale += 1
+        elif data.get("status") == "ok":
+            ok += 1
+        else:
+            fail += 1
+    return f"hb: {ok}ok/{fail}fail/{stale}stale"
+
+
+def render_body(candidates, generated_at, sources_sha256, overflow_count=0, hb_summary=None):
+    by_class = {class_num: [] for class_num in CLASS_CAPS}
+    for item in candidates:
+        by_class[item["event"]["class"]].append(item["event"])
+    for events in by_class.values():
+        events.sort(key=lambda event: event["created_at_dt"], reverse=True)
+
+    lines = ["# Family Hot", ""]
+    for class_num in RENDER_CLASS_ORDER:
+        events = by_class[class_num][: CLASS_CAPS[class_num]]
+        if not events:
+            continue
+        lines.append(f"## C{class_num} {CLASS_TITLES[class_num]}")
+        for event in events:
+            lines.append(render_item(event))
+        lines.append("")
+
+    lines.append("---")
+    if overflow_count:
+        lines.append(f"- [class:1 id:overflow] overflow: {overflow_count} events pending")
+    heartbeat_line = (
+        f"- [class:1 id:generator-heartbeat] at: {generated_at}; "
+        f"gen: {GENERATOR_VERSION}; pinned: {PINNED_FALLBACK_ID}"
+    )
+    if hb_summary:
+        heartbeat_line += f"; {hb_summary}"
+    lines.extend([heartbeat_line, ""])
+    return "\n".join(lines)
+
+
+def build_output(body_text, sources_sha256):
+    placeholder = (
+        f"{GENERATED_MARKER}\n"
+        f"<!-- generator: {GENERATOR_VERSION}; sources_sha256: {sources_sha256}; body_sha256: {'0' * 64} -->\n"
+        f"{body_text}"
+    ).encode("utf-8")
+    body_sha256 = compute_body_sha256(placeholder)
+    return (
+        f"{GENERATED_MARKER}\n"
+        f"<!-- generator: {GENERATOR_VERSION}; sources_sha256: {sources_sha256}; body_sha256: {body_sha256} -->\n"
+        f"{body_text}"
+    ).encode("utf-8")
+
+
+def capped_render_candidates(candidates):
+    by_class = {class_num: [] for class_num in CLASS_CAPS}
+    for item in candidates:
+        by_class[item["event"]["class"]].append(item)
+    rendered = []
+    for class_num in RENDER_CLASS_ORDER:
+        newest_first = sorted(
+            by_class[class_num],
+            key=lambda item: item["event"]["created_at_dt"],
+            reverse=True,
+        )
+        rendered.extend(newest_first[: CLASS_CAPS[class_num]])
+    return rendered
+
+
+def build_size_capped_output(candidates, generated_at, sources_sha256):
+    rendered = capped_render_candidates(candidates)
+    overflow_count = 0
+    hb_summary = heartbeat_summary()  # once per run — the size-fit loop must see a stable footer
+    while True:
+        body_text = render_body(rendered, generated_at, sources_sha256, overflow_count, hb_summary)
+        raw_output = build_output(body_text, sources_sha256)
+        if len(raw_output) <= SIZE_CAP_BYTES:
+            return raw_output, rendered
+
+        dropped = False
+        for class_num in OVERFLOW_DROP_ORDER:
+            in_class = [item for item in rendered if item["event"]["class"] == class_num]
+            if not in_class:
+                continue
+            oldest = min(in_class, key=lambda item: item["event"]["created_at_dt"])
+            rendered = [item for item in rendered if item is not oldest]
+            overflow_count += 1
+            dropped = True
+            break
+        if not dropped:
+            raise FamilyHotError("fixed family-hot markers exceed 2048 bytes")
+
+
+def build_ledger(accepted, generated_at, sources_sha256):
+    events = []
+    for item in sorted(accepted, key=lambda entry: entry["path"].name):
+        event = item["event"]
+        events.append(
+            {
+                "event_id": event["event_id"],
+                "filename": item["path"].name,
+                "sha256": item["sha256"],
+                "kind": event["kind"],
+                "class": event.get("class"),
+            }
+        )
+    return {
+        "generated_at": generated_at,
+        "generator": GENERATOR_VERSION,
+        "pinned_fallback": PINNED_FALLBACK_ID,
+        "sources_sha256": sources_sha256,
+        "accepted_event_ids": [entry["event_id"] for entry in events],
+        "events": events,
+    }
+
+
+def find_blocking_generation_issues(raw_bytes, candidates, now):
+    issues = []
+    if len(raw_bytes) > SIZE_CAP_BYTES:
+        counts = {}
+        for item in candidates:
+            class_num = item["event"]["class"]
+            counts[class_num] = counts.get(class_num, 0) + 1
+        overflowing = ", ".join(f"class {key} candidates={counts[key]}" for key in sorted(counts)) or "rendered output"
+        issues.append(f"family-hot.md exceeds 2048 bytes ({len(raw_bytes)} bytes); overflowing: {overflowing}")
+    try:
+        scan_secret_text(raw_bytes.decode("utf-8"), "rendered output")
+    except FamilyHotError as exc:
+        issues.append(str(exc))
+    for item in candidates:
+        event = item["event"]
+        if event["kind"] == "caution":
+            ttl_span = effective_caution_expiry(event) - event["created_at_dt"]
+            if ttl_span > timedelta(days=14):
+                issues.append(f"caution TTL exceeds 14 days: {event['event_id']}")
+        if event["class"] == 5 and event.get("promotion_pending"):
+            elapsed = now - event["created_at_dt"]
+            has_owner_and_review = bool(event.get("owner") and event.get("next_review_at"))
+            if elapsed > timedelta(hours=72) and not has_owner_and_review:
+                issues.append(f"promotion_pending exceeds 72h without owner and next_review_at: {event['event_id']}")
+    lines = raw_bytes.decode("utf-8").splitlines()
+    if not lines or lines[0] != GENERATED_MARKER:
+        issues.append("missing generated marker")
+    if len(lines) < 2 or not META_RE.fullmatch(lines[1]):
+        issues.append("malformed generator metadata")
+    elif compute_body_sha256(raw_bytes) != META_RE.fullmatch(lines[1]).group(1):
+        issues.append("body_sha256 self-check failed")
+    return issues
+
+
+def write_atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        tmp_name = handle.name
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_name, path)
+
+
+def expected_artifact_owner():
+    """Return the expected generated-artifact owner/group.
+
+    The default expectation is the current process owner, which keeps the
+    permission self-check portable across machines. A deployment that runs the
+    generator under a dedicated account pins its server invariant explicitly
+    with FMA_EXPECT_OWNER="user:group"; an unknown name then fails closed
+    instead of silently weakening the check.
+    """
+    pinned = os.environ.get("FMA_EXPECT_OWNER", "").strip()
+    if pinned:
+        user_name, _, group_name = pinned.partition(":")
+        group_name = group_name or user_name
+        try:
+            uid = pwd.getpwnam(user_name).pw_uid
+            gid = grp.getgrnam(group_name).gr_gid
+        except KeyError:
+            raise SystemExit(
+                f"ERROR: FMA_EXPECT_OWNER references an unknown user/group: {pinned}"
+            )
+        return uid, gid, user_name, group_name
+    uid = os.getuid()
+    gid = os.getgid()
+    return uid, gid, pwd.getpwuid(uid).pw_name, grp.getgrgid(gid).gr_name
+
+
+def enforce_generated_artifact_permissions(paths):
+    expected_uid, expected_gid, expected_user, expected_group = expected_artifact_owner()
+    issues = []
+    for path in paths:
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError as exc:
+            issues.append(f"{path}: failed to chmod 0600: {exc}")
+            continue
+
+        st = path.stat()
+        if (st.st_uid, st.st_gid) != (expected_uid, expected_gid) and os.geteuid() == 0:
+            try:
+                os.chown(path, expected_uid, expected_gid)
+                st = path.stat()
+            except OSError as exc:
+                issues.append(f"{path}: failed to chown {expected_user}:{expected_group}: {exc}")
+                continue
+
+        mode = stat.S_IMODE(st.st_mode)
+        if mode != 0o600:
+            issues.append(f"{path}: mode is {mode:04o}, expected 0600")
+        if (st.st_uid, st.st_gid) != (expected_uid, expected_gid):
+            owner = f"{pwd.getpwuid(st.st_uid).pw_name}:{grp.getgrgid(st.st_gid).gr_name}"
+            issues.append(f"{path}: owner is {owner}, expected {expected_user}:{expected_group}")
+    return issues
+
+
+HEARTBEAT_TIMEOUT_SECONDS = 10
+
+
+def emit_heartbeat(status, reason, docs, started):
+    # Telemetry is best-effort and runs in main's finally after the artifacts
+    # are already written (or definitively not written): nothing here may hang
+    # the 15-minute cron or override the generator's exit status.
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("job-heartbeat")),
+        "family-hot-generate",
+        status,
+        "--docs",
+        str(docs),
+        "--duration-ms",
+        str(int((time.monotonic() - started) * 1000)),
+    ]
+    if status == "fail":
+        command.extend(["--reason", reason or "failed"])
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=HEARTBEAT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"exit {result.returncode}"
+            print(f"warning: heartbeat write failed: {detail}", file=sys.stderr)
+    except Exception as exc:
+        try:
+            print(f"warning: heartbeat write failed: {exc}", file=sys.stderr)
+        except Exception:
+            pass
+
+
+def generate(args):
+    args.docs_count = 0
+    args.failure_reason = None
+    vault_root = expand_path(args.vault_root)
+    index_dir = vault_root / "00_index"
+    inbox_dir = index_dir / "hot-inbox"
+    output_path = index_dir / "family-hot.md"
+    ledger_path = index_dir / "family-hot.sources.json"
+    now = parse_iso_datetime(args.now, "--now") if args.now else datetime.now(timezone.utc)
+    generated_at = utc_z(now)
+
+    accepted, _skipped = read_inbox_events(inbox_dir, now)
+    candidates = active_candidates(accepted, now)
+    sources_sha256 = source_hash(accepted)
+    raw_output, rendered = build_size_capped_output(candidates, generated_at, sources_sha256)
+    args.docs_count = len(rendered)
+    ledger = build_ledger(accepted, generated_at, sources_sha256)
+    ledger_bytes = (json.dumps(ledger, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    issues = find_blocking_generation_issues(raw_output, candidates, now)
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}", file=sys.stderr)
+        args.failure_reason = "; ".join(issues)
+        return 2
+
+    if args.dry_run:
+        sys.stdout.buffer.write(raw_output)
+        return 0
+    if args.check:
+        print(f"OK: family-hot generation check passed ({len(raw_output)} bytes)")
+        return 0
+
+    try:
+        index_dir.mkdir(parents=True, exist_ok=True)
+        write_atomic(ledger_path, ledger_bytes)
+        write_atomic(output_path, raw_output)
+    except OSError as exc:
+        args.failure_reason = f"failed to write generated files: {exc}"
+        print(f"ERROR: {args.failure_reason}", file=sys.stderr)
+        return 2
+
+    permission_issues = enforce_generated_artifact_permissions([output_path, ledger_path])
+    if permission_issues:
+        for issue in permission_issues:
+            print(f"ERROR: generated artifact permission self-check failed: {issue}", file=sys.stderr)
+        args.failure_reason = "; ".join(permission_issues)
+        return 2
+
+    print(output_path)
+    return 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Generate family-hot.md from hot-inbox events.")
+    parser.add_argument("--vault-root", default=os.environ.get("FAMILY_HOT_VAULT", DEFAULT_VAULT_ROOT))
+    parser.add_argument("--now", help="ISO8601 generation time override for deterministic tests")
+    parser.add_argument("--dry-run", action="store_true", help="print generated markdown and write nothing")
+    parser.add_argument("--check", action="store_true", help="validate and self-check generation without writing files")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    started = time.monotonic()
+    exit_code = 2
+    reason = None
+    try:
+        exit_code = generate(args)
+        reason = getattr(args, "failure_reason", None)
+    except FamilyHotError as exc:
+        reason = str(exc)
+        print(f"ERROR: {reason}", file=sys.stderr)
+    except Exception as exc:
+        reason = f"runtime error: {exc}"
+        print(f"ERROR: {reason}", file=sys.stderr)
+    finally:
+        if not args.dry_run and not args.check:
+            status = "ok" if exit_code == 0 else "fail"
+            emit_heartbeat(status, reason, getattr(args, "docs_count", 0), started)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
