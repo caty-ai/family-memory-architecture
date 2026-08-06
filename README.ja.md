@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-publication%20in%20preparation-lightgrey)
+![status](https://img.shields.io/badge/status-published-brightgreen)
 
 複数の AI エージェントに「共有の記憶」を持たせるための、設計・運用ルール・実装ツール一式です。<br>
 別々の場所で動く AI は、こちらで決めたことをあちらが知りません。<br>
@@ -291,7 +291,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 縦軸 | **Persona Growth Loop** | 人格そのものを育てる — 最小・冪等な提案づくり | 公開準備中 |
 | 縦軸 | [X Collector](https://github.com/caty-ai/x-collector) | Xやウェブの素材を1日1回のダイジェストに — 人にもエージェントにも | 公開・MIT |
 | 縦軸 | **Self Growth Loop** | エージェントが自分の能力を育てるループ — 提案・ガバナンス・採用記録 | 公開準備中 |
-| 横軸・基盤 | **Family Memory Architecture** | 記憶バス — 家族が知っていることを共有する層 | 公開準備中 |
+| 横軸・基盤 | **Family Memory Architecture** | 記憶バス — 家族が知っていることを共有する層 | 公開・MIT |
 | 横軸 | [Sitter](https://github.com/caty-ai/sitter) | 委譲したエージェント実行の見張り番 — 監視・証拠の記録・再起動 | 公開・MIT |
 
 家族として並行開発するときのルールは [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook) にあります。そして、つないでも実行の権限は移りません。FMA は情報を共有するだけで、他のエージェントを動かしません。
@@ -320,7 +320,7 @@ FMA は、私たちが作っていない次のツール・サービスの上に�
 
 ## ライセンス
 
-ライセンスは [MIT](LICENSE) です。誰でも自由に使って、自分の家族向けに作り替えてほしいので MIT にしています。リポジトリ本体はいま公開準備中で、公開は [caty-ai](https://github.com/caty-ai) 側で行う予定です。
+ライセンスは [MIT](LICENSE) です。誰でも自由に使って、自分の家族向けに作り替えてほしいので MIT にしています。本リポジトリは [caty-ai](https://github.com/caty-ai) から公開しています。
 
 ---
 

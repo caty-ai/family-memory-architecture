@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-publication%20in%20preparation-lightgrey)
+![status](https://img.shields.io/badge/status-published-brightgreen)
 
 这是一套设计、一组运行规则，以及一批真正可用的工具，用来让多个 AI Agent 拥有共享的记忆。<br>
 在不同地方运行的 AI，彼此不知道对方决定了什么。<br>
@@ -290,7 +290,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 纵轴 | **Persona Growth Loop** | 让人格本身成长 — 以最小且幂等的提案 | 准备公开中 |
 | 纵轴 | [X Collector](https://github.com/caty-ai/x-collector) | 把 X 与网络素材汇成每日一份摘要 — 给人也给智能体 | 已公开・MIT |
 | 纵轴 | **Self Growth Loop** | 让智能体自我成长的循环 — 提案、治理与采用记录 | 准备公开中 |
-| 横轴・基座 | **Family Memory Architecture** | 记忆总线 — 家族共享所知的一层 | 准备公开中 |
+| 横轴・基座 | **Family Memory Architecture** | 记忆总线 — 家族共享所知的一层 | 已公开・MIT |
 | 横轴 | [Sitter](https://github.com/caty-ai/sitter) | 替你盯着委派出去的智能体 — 监视、留证、重启 | 已公开・MIT |
 
 家族并行开发的规则在 [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook)。而且，连接不会转移执行权限：FMA 只共享信息，不驱动其他 Agent。
@@ -319,7 +319,7 @@ FMA 建立在以下这些并非由我们开发的工具和服务之上。
 
 ## 许可证
 
-采用 [MIT](LICENSE) 许可证。我们选择 MIT，是希望任何人都能自由使用它，并为自己的家族改造它。这个仓库目前正在准备公开，公开后将归属 [caty-ai](https://github.com/caty-ai)。
+采用 [MIT](LICENSE) 许可证。我们选择 MIT，是希望任何人都能自由使用它，并为自己的家族改造它。本仓库已在 [caty-ai](https://github.com/caty-ai) 名下公开。
 
 ---
 

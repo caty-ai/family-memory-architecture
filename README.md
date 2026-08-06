@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-publication%20in%20preparation-lightgrey)
+![status](https://img.shields.io/badge/status-published-brightgreen)
 
 A design, a set of operating rules, and working tools for giving multiple AI agents a shared memory.<br>
 AI agents running in different places never know what was decided elsewhere.<br>
@@ -291,7 +291,7 @@ This repository is a member of **[Family OS](https://github.com/caty-ai/family-o
 | Vertical | **Persona Growth Loop** | Grows the persona itself — minimal, idempotent proposals | publication in preparation |
 | Vertical | [X Collector](https://github.com/caty-ai/x-collector) | Turns X and the web into one daily digest — for people and agents | published, MIT |
 | Vertical | **Self Growth Loop** | Lets an agent grow its own abilities — proposals, governance, adoption records | publication in preparation |
-| Horizontal · foundation | **Family Memory Architecture** | The memory bus — how the family shares what it knows | publication in preparation |
+| Horizontal · foundation | **Family Memory Architecture** | The memory bus — how the family shares what it knows | published, MIT |
 | Horizontal | [Sitter](https://github.com/caty-ai/sitter) | Babysits delegated agent runs — watches, keeps evidence, restarts | published, MIT |
 
 The rules for developing in parallel as a family live in the [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook). And connecting never moves authority: FMA shares information; it does not drive other agents.
@@ -320,7 +320,7 @@ The grep layer of `recall` gets faster with [ripgrep](https://github.com/BurntSu
 
 ## License
 
-Licensed under [MIT](LICENSE). We chose MIT because we want anyone to use this freely and remake it for their own family. The repository is currently being prepared for publication, which will happen under [caty-ai](https://github.com/caty-ai).
+Licensed under [MIT](LICENSE). We chose MIT because we want anyone to use this freely and remake it for their own family. The repository is published under [caty-ai](https://github.com/caty-ai).
 
 ---
 

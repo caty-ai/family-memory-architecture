@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-publication%20in%20preparation-lightgrey)
+![status](https://img.shields.io/badge/status-published-brightgreen)
 
 นี่คือชุดของแนวคิดออกแบบ กติกาการทำงาน และเครื่องมือใช้งานจริง เพื่อให้ AI agent หลายตัวมี "ความทรงจำร่วม" กันได้<br>
 AI agent ที่ทำงานอยู่คนละที่ จะไม่มีทางรู้เลยว่าอีกฝั่งตัดสินใจอะไรไปแล้ว<br>
@@ -291,7 +291,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | แกนตั้ง | **Persona Growth Loop** | พัฒนาบุคลิกของเอเจนต์ — สร้างข้อเสนอแบบน้อยที่สุดและทำซ้ำได้ | กำลังเตรียมเปิด |
 | แกนตั้ง | [X Collector](https://github.com/caty-ai/x-collector) | รวบรวมข้อมูลจาก X และเว็บเป็นสรุปวันละฉบับ — สำหรับคนและเอเจนต์ | เปิดแล้ว・MIT |
 | แกนตั้ง | **Self Growth Loop** | วงจรให้เอเจนต์พัฒนาความสามารถของตัวเอง — ข้อเสนอ ธรรมาภิบาล และบันทึกการนำไปใช้ | กำลังเตรียมเปิด |
-| แกนนอน · รากฐาน | **Family Memory Architecture** | บัสความทรงจำ — ชั้นที่ครอบครัวใช้แบ่งปันสิ่งที่รู้ | กำลังเตรียมเปิด |
+| แกนนอน · รากฐาน | **Family Memory Architecture** | บัสความทรงจำ — ชั้นที่ครอบครัวใช้แบ่งปันสิ่งที่รู้ | เปิดแล้ว・MIT |
 | แกนนอน | [Sitter](https://github.com/caty-ai/sitter) | พี่เลี้ยงของงานที่มอบหมายให้เอเจนต์ — เฝ้าดู เก็บหลักฐาน และรีสตาร์ต | เปิดแล้ว・MIT |
 
 กติกาสำหรับการพัฒนาแบบขนานทั้งครอบครัวอยู่ใน [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook) และการเชื่อมต่อไม่ได้ย้ายอำนาจการทำงาน: FMA แค่แชร์ข้อมูล ไม่ได้สั่งการ agent ตัวอื่น
@@ -320,7 +320,7 @@ FMA ถูกสร้างขึ้นบนเครื่องมือแ�
 
 ## สัญญาอนุญาต
 
-อยู่ภายใต้สัญญาอนุญาต [MIT](LICENSE) เราเลือก MIT เพราะอยากให้ทุกคนใช้งานได้อย่างอิสระ และนำไปดัดแปลงใหม่สำหรับครอบครัวของตัวเอง ตอนนี้รีโปกำลังอยู่ระหว่างเตรียมเผยแพร่ ซึ่งจะเกิดขึ้นภายใต้ [caty-ai](https://github.com/caty-ai)
+อยู่ภายใต้สัญญาอนุญาต [MIT](LICENSE) เราเลือก MIT เพราะอยากให้ทุกคนใช้งานได้อย่างอิสระ และนำไปดัดแปลงใหม่สำหรับครอบครัวของตัวเอง รีโปนี้เผยแพร่แล้วภายใต้ [caty-ai](https://github.com/caty-ai)
 
 ---
 
