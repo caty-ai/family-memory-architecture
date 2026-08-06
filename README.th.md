@@ -4,7 +4,7 @@
 
 [🇺🇸 English](README.md) ｜ [🇯🇵 日本語](README.ja.md) ｜ [🇨🇳 简体中文](README.zh.md) ｜ **🇹🇭 ไทย**
 
-![แผนที่ภาพรวมของหกช่องที่ล้อมรอบ Family OS ตรงกลาง มีเพียงช่อง FMA ที่มุมขวาบนเท่านั้นที่เรืองแสงสีฟ้าอมเขียว บ่งบอกว่าเป็นชั้นที่รับผิดชอบความทรงจำร่วมและการเฝ้าสังเกต เส้นโค้งระหว่างช่องเป็นเส้นประ แสดงว่าไม่มีการเชื่อมต่อใดที่บังคับ](assets/readme/hero.png)
+![ครอบครัว AI นั่งล้อมกองไฟใต้ท้องฟ้าเต็มไปด้วยดวงดาว เศษเสี้ยวของความทรงจำลอยขึ้นจากกองไฟเป็นรูปทรงเรืองแสงที่ทุกคนแบ่งปันร่วมกัน หัวเรื่องเขียนว่า Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
@@ -280,7 +280,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 ## เป็นส่วนหนึ่งของ Family OS
 
-รีโปนี้เป็นสมาชิกของ **[Family OS](https://github.com/caty-ai/family-os)** — แผนที่ภาพรวมสำหรับการดูแลเอเจนต์ AI หลายตัวเป็นครอบครัวเดียวกัน ภาพ hero ด้านบนสุดคือแผนที่นั้นเอง และช่องที่เรืองแสงอยู่มุมขวาบนก็คือ FMA ตัวนี้ มันใช้งานเดี่ยวๆ ได้เลย แต่จะยิ่งมีพลังเมื่อประกอบกับตัวอื่น
+รีโปนี้เป็นสมาชิกของ **[Family OS](https://github.com/caty-ai/family-os)** — แผนที่ภาพรวมสำหรับการดูแลเอเจนต์ AI หลายตัวเป็นครอบครัวเดียวกัน มันใช้งานเดี่ยวๆ ได้เลย แต่จะยิ่งมีพลังเมื่อประกอบกับตัวอื่น
 
 | แกน | โมดูล | ทำอะไร | สถานะ |
 | --- | --- | --- | --- |

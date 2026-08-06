@@ -4,7 +4,7 @@
 
 [🇺🇸 English](README.md) ｜ [🇯🇵 日本語](README.ja.md) ｜ **🇨🇳 简体中文** ｜ [🇹🇭 ไทย](README.th.md)
 
-![六个方块围绕中央 Family OS 的全景图。只有右上角的 FMA 方块发出青色光芒，标示它是负责共享记忆与观测的那一层。方块之间的弧线为虚线，表示没有任何连接是必须的。](assets/readme/hero.png)
+![星空下，一个 AI 家族围坐在篝火旁。记忆的碎片化作发光的图形从火中升起，被围坐的所有人共享。标题写着 Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
@@ -279,7 +279,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 ## Family OS 的一员
 
-本仓库是 **[Family OS](https://github.com/caty-ai/family-os)** —— 把多个 AI Agent 当作一个家族来运营的整体地图 —— 的成员之一。页首的 hero 图正是那张地图，右上角发光的方块就是这个 FMA。它可以单独使用，但与下面这些组合起来会发挥更大的力量。
+本仓库是 **[Family OS](https://github.com/caty-ai/family-os)** —— 把多个 AI Agent 当作一个家族来运营的整体地图 —— 的成员之一。它可以单独使用，但与下面这些组合起来会发挥更大的力量。
 
 | 轴 | 模块 | 做什么 | 状态 |
 | --- | --- | --- | --- |

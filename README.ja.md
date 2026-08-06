@@ -4,7 +4,7 @@
 
 [🇺🇸 English](README.md) ｜ **🇯🇵 日本語** ｜ [🇨🇳 简体中文](README.zh.md) ｜ [🇹🇭 ไทย](README.th.md)
 
-![6つのタイルが中央のFamily OSを囲む全体地図。右上のFMAタイルだけがシアンに光り、共有記憶と観測の担当であることを示す。タイル間の弧は点線で、どの接続も必須ではないことを表す。](assets/readme/hero.png)
+![星空の下、焚き火を囲んで座る AI ファミリー。焚き火からは記憶の欠片が光の図形になって立ちのぼり、全員がそれを共有している。見出しは Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
@@ -280,7 +280,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 ## Family OS の一員です
 
-このリポジトリは、複数の AI エージェントをひとつの家族として運用するための全体地図 **[Family OS](https://github.com/caty-ai/family-os)** の一員です。冒頭の hero 画像がその地図で、右上に光っているタイルがこの FMA です。単独でそのまま使えますが、次と組み合わせるとさらに力を発揮します。
+このリポジトリは、複数の AI エージェントをひとつの家族として運用するための全体地図 **[Family OS](https://github.com/caty-ai/family-os)** の一員です。単独でそのまま使えますが、次と組み合わせるとさらに力を発揮します。
 
 | 軸 | モジュール | 何をするもの | 状態 |
 | --- | --- | --- | --- |

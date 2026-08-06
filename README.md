@@ -4,7 +4,7 @@
 
 **🇺🇸 English** ｜ [🇯🇵 日本語](README.ja.md) ｜ [🇨🇳 简体中文](README.zh.md) ｜ [🇹🇭 ไทย](README.th.md)
 
-![Overview map of six tiles surrounding Family OS in the center. Only the FMA tile in the upper right glows cyan, marking it as the layer in charge of shared memory and observation. The arcs between tiles are dotted, showing that no connection is mandatory.](assets/readme/hero.png)
+![An AI family sitting around a campfire under a starry sky. Fragments of memory rise from the fire as glowing shapes, shared by everyone around it. The heading reads Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
@@ -280,7 +280,7 @@ Where this repository stands in the bigger picture comes next.
 
 ## Part of Family OS
 
-This repository is a member of **[Family OS](https://github.com/caty-ai/family-os)** — the overall map for running multiple AI agents as one family. The hero image at the top is that map, and the tile glowing in the upper right is FMA. It works on its own, and it becomes stronger combined with the others.
+This repository is a member of **[Family OS](https://github.com/caty-ai/family-os)** — the overall map for running multiple AI agents as one family. It works on its own, and it becomes stronger combined with the others.
 
 | Axis | Module | What it does | State |
 | --- | --- | --- | --- |
