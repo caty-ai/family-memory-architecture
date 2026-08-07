@@ -1335,6 +1335,7 @@ sources:
 if __name__ == "__main__":
     import test_capture_shipper
     import test_backup_dashboard
+    import test_fixture_smoke
     import test_family_hot_generate
     import test_hot_inbox_reader
     import test_job_heartbeat
@@ -1356,6 +1357,7 @@ if __name__ == "__main__":
                 else []
             ),
             unittest.defaultTestLoader.loadTestsFromModule(test_capture_shipper),
+            unittest.defaultTestLoader.loadTestsFromModule(test_fixture_smoke),
             unittest.defaultTestLoader.loadTestsFromModule(test_family_hot_generate),
             unittest.defaultTestLoader.loadTestsFromModule(test_hot_inbox_reader),
             unittest.defaultTestLoader.loadTestsFromModule(test_job_heartbeat),

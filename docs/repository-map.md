@@ -87,6 +87,7 @@ CLI 22本＋共通ライブラリ1本。`content-lint` と `injection-lint` の2
 | `fixed-injection.yaml` | 1エージェントの毎セッション固定注入のバイト予算 |
 | `injection/agent-g.yaml` | エージェント別の注入面契約のお手本 |
 | `injection/platform-caps.yaml` | プラットフォーム別の注入上限の中央表（各エージェント manifest が参照） |
+| `fixtures/` | 3つの validator を 1 コマンドずつで緑確認できる最小スモーク用 fixture セット |
 
 ---
 

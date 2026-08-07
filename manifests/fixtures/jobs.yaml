@@ -1,0 +1,9 @@
+jobs:
+  - id: fixture-watchdog
+    desc: "Fixture watchdog entry"
+    host: laptop
+    owner: agent-a
+    period_hours: 24
+    heartbeat: fixture-watchdog.json
+    alert: [stderr]
+    exempt: true

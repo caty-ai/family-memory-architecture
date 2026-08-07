@@ -1,0 +1,13 @@
+agent: fixture-agent
+platform: openclaw
+workspace: manifests/fixtures/injection/workspace
+files:
+  - path: AGENTS.md
+    role: agents
+    max_chars: 80
+rot:
+  as_of_ttl_days: 90
+  applies_to_roles: [memory]
+report:
+  channel: hot-inbox
+  also: state-file

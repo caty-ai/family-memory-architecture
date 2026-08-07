@@ -1,0 +1,9 @@
+version: 1
+agent: fixture-agent
+generated_at: "2026-08-07"
+target_total_bytes: 64
+sources:
+  - id: fixture-fixed-source
+    path: manifests/fixtures/fixed-source.txt
+    kind: hand-edited
+    max_bytes: 64

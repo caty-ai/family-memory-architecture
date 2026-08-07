@@ -1,0 +1,1 @@
+Keep fixture output terse.

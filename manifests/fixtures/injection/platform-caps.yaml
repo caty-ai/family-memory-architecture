@@ -1,0 +1,6 @@
+platforms:
+  openclaw:
+    per_file_chars: 200
+    context_per_file_chars: 200
+    total_chars: 400
+warn_ratio: 0.8
