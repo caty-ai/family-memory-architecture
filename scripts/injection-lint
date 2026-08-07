@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Lint per-agent fixed injection manifests for size budgets and stale facts."""
+"""Lint per-agent fixed injection manifests for size budgets and stale facts.
+
+YAML manifests must stay within the constrained subset: use two-space
+indentation and quote values containing ``#``.
+"""
 
 import argparse
 import datetime

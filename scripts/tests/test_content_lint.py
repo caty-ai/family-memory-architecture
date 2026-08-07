@@ -143,6 +143,111 @@ heading_categories:
             },
         )
 
+    def test_yaml_subset_preserves_unquoted_hashes(self):
+        parsed = self.module.parse_yaml_subset(
+            """one: foo#bar
+two: see#fragment
+three:
+  - b#c
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {"one": "foo#bar", "two": "see#fragment", "three": ["b#c"]},
+        )
+
+    def test_yaml_subset_accepts_mid_token_quotes_as_plain_text(self):
+        parsed = self.module.parse_yaml_subset(
+            """one: don't panic
+two: a"b
+three: [don't panic, a"b, b#c]
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {"one": "don't panic", "two": 'a"b', "three": ["don't panic", 'a"b', "b#c"]},
+        )
+
+    def test_yaml_subset_accepts_indentless_sequences_under_mapping_keys(self):
+        parsed = self.module.parse_yaml_subset(
+            """a:
+- x
+- y
+b: z
+root:
+  child:
+  - x
+  - y
+  sibling: z
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {
+                "a": ["x", "y"],
+                "b": "z",
+                "root": {"child": ["x", "y"], "sibling": "z"},
+            },
+        )
+
+        with self.assertRaises(self.module.YamlSubsetError) as raised:
+            self.module.parse_yaml_subset("a:\n    - x\n")
+        self.assertIn("line 2: unexpected indentation", str(raised.exception))
+        self.assertNotIn("mix", str(raised.exception))
+
+    def test_yaml_subset_rejects_empty_list_items_before_same_indent_siblings(self):
+        rejected = (
+            "root:\n  -\n  - x\n",
+            "root:\n  -\n  - key: value\n",
+        )
+
+        for text in rejected:
+            with self.subTest(text=text):
+                with self.assertRaises(self.module.YamlSubsetError) as raised:
+                    self.module.parse_yaml_subset(text)
+                self.assertIn("line 2: empty block-list item", str(raised.exception))
+
+    def test_yaml_subset_accepts_quoted_mapping_keys(self):
+        parsed = self.module.parse_yaml_subset(
+            """root:
+  '日本語 file.md': one
+  "a:b#c": two
+  'it''s.md': three
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {"root": {"日本語 file.md": "one", "a:b#c": "two", "it's.md": "three"}},
+        )
+
+        with self.assertRaises(self.module.YamlSubsetError) as raised:
+            self.module.parse_yaml_subset('"same": one\nsame: two\n')
+        self.assertIn("line 2: duplicate mapping key 'same'", str(raised.exception))
+
+    def test_yaml_subset_rejects_excessive_nesting_with_subset_error(self):
+        nesting_limit = 100
+        text = "\n".join(
+            f"{'  ' * depth}level_{depth}:"
+            for depth in range(nesting_limit + 1)
+        )
+
+        with self.assertRaises(self.module.YamlSubsetError) as raised:
+            self.module.parse_yaml_subset(text)
+        self.assertIn(
+            f"line {nesting_limit + 1}: nesting depth exceeds limit",
+            str(raised.exception),
+        )
+
+    def test_yaml_subset_rejects_non_ascii_whitespace_on_the_split_line_number(self):
+        with self.assertRaises(self.module.YamlSubsetError) as raised:
+            self.module.parse_yaml_subset("root: value\r\n  bad\N{NO-BREAK SPACE}key: value\n")
+
+        self.assertIn("line 2: non-ASCII whitespace U+00A0", str(raised.exception))
+
     def test_yaml_subset_rejects_unsupported_or_malformed_constructs_with_line_numbers(self):
         rejected = {
             "tabs": "root:\n\tchild: value\n",
@@ -171,6 +276,7 @@ heading_categories:
             "leading-zero integer": "root: 012\n",
             "hex integer": "root: 0x10\n",
             "underscored integer": "root: 1_000\n",
+            "oversized integer": "root: " + "9" * 5000 + "\n",
             "leading-dot float": "root: .5\n",
             "trailing-dot float": "root: 1.\n",
             "NUL": "root: value\x00\n",
@@ -203,6 +309,7 @@ heading_categories:
             "leading-zero integer": 1,
             "hex integer": 1,
             "underscored integer": 1,
+            "oversized integer": 1,
             "leading-dot float": 1,
             "trailing-dot float": 1,
             "NUL": 1,

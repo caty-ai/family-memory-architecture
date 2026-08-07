@@ -25,6 +25,7 @@ NUMERIC_LIKE_RE = re.compile(
 )
 SPECIAL_TOKEN_RE = re.compile(r"(?:^|\s)[&*!]")
 AMBIGUOUS_WORDS = {"yes", "no", "on", "off", "true", "false", "null"}
+MAX_NESTING_DEPTH = 100
 
 
 class YamlSubsetError(ValueError):
@@ -43,37 +44,57 @@ def _error(line_number, message):
 
 
 def _strip_comment(raw_line):
-    in_single = False
-    in_double = False
+    quote = None
     escaped = False
-    for index, char in enumerate(raw_line):
-        if escaped:
-            escaped = False
+    token_start = True
+    index = 0
+    while index < len(raw_line):
+        char = raw_line[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
             continue
-        if char == "\\" and in_double:
-            escaped = True
+        if quote == "'":
+            if char == quote:
+                if index + 1 < len(raw_line) and raw_line[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
             continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-            continue
-        if char == '"' and not in_single:
-            in_double = not in_double
-            continue
-        if char == "#" and not in_single and not in_double:
+
+        if char == "#" and (index == 0 or raw_line[index - 1] == " "):
             return raw_line[:index].rstrip()
+        if char in ("'", '"') and token_start:
+            quote = char
+            token_start = False
+        elif char == " ":
+            pass
+        elif char in "[:,":
+            token_start = True
+        elif char == "-" and token_start and index + 1 < len(raw_line) and raw_line[index + 1] == " ":
+            token_start = True
+        else:
+            token_start = False
+        index += 1
     return raw_line.rstrip()
 
 
 def _validate_characters(text):
-    line_number = 1
-    for index, char in enumerate(text):
-        codepoint = ord(char)
-        if char == "\t":
-            _error(line_number, "tabs are not allowed")
-        if (codepoint < 0x20 and char not in "\r\n") or 0x7F <= codepoint <= 0x9F:
-            _error(line_number, f"forbidden control character U+{codepoint:04X}")
-        if char == "\n" or (char == "\r" and (index + 1 == len(text) or text[index + 1] != "\n")):
-            line_number += 1
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+        for char in raw_line:
+            codepoint = ord(char)
+            if char == "\t":
+                _error(line_number, "tabs are not allowed")
+            if (codepoint < 0x20 and char not in "\r\n") or 0x7F <= codepoint <= 0x9F:
+                _error(line_number, f"forbidden control character U+{codepoint:04X}")
+            if codepoint > 0x7F and char.isspace():
+                _error(line_number, f"non-ASCII whitespace U+{codepoint:04X} is not allowed")
 
 
 def _tokenize(text):
@@ -132,31 +153,43 @@ def _split_inline_list(value, line_number):
 
     items = []
     start = 0
-    in_single = False
-    in_double = False
+    quote = None
     escaped = False
-    for index, char in enumerate(inner):
-        if escaped:
-            escaped = False
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
             continue
-        if char == "\\" and in_double:
-            escaped = True
+        if quote == "'":
+            if char == quote:
+                if index + 1 < len(inner) and inner[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
             continue
-        if char == "'" and not in_double:
-            in_single = not in_single
+
+        if char in ("'", '"') and not inner[start:index].strip():
+            quote = char
+            index += 1
             continue
-        if char == '"' and not in_single:
-            in_double = not in_double
-            continue
-        if not in_single and not in_double and char in "[]{}":
+        if char in "[]{}":
             _error(line_number, "nested flow collections are not supported")
-        if char == "," and not in_single and not in_double:
+        if char == ",":
             item = inner[start:index].strip()
             if not item:
                 _error(line_number, "inline list contains an empty item")
             items.append(item)
             start = index + 1
-    if in_single or in_double:
+        index += 1
+    if quote is not None:
         _error(line_number, "unterminated quoted string in inline list")
     item = inner[start:].strip()
     if not item:
@@ -175,8 +208,6 @@ def _parse_scalar(value, line_number):
         return [_parse_scalar(item, line_number) for item in _split_inline_list(value, line_number)]
     if "]" in value or "[" in value:
         _error(line_number, "malformed inline list")
-    if "'" in value or '"' in value:
-        _error(line_number, "quotes must enclose the entire scalar")
     if value == "{}":
         return {}
     if "{" in value or "}" in value:
@@ -195,7 +226,10 @@ def _parse_scalar(value, line_number):
     if value == "false":
         return False
     if INTEGER_RE.fullmatch(value):
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            _error(line_number, "integer scalar is too large")
     if DECIMAL_RE.fullmatch(value):
         return float(value)
     if ISO_DATE_RE.fullmatch(value):
@@ -209,13 +243,50 @@ def _parse_scalar(value, line_number):
     return value
 
 
+def _mapping_delimiter_index(content):
+    if not content:
+        return None
+    if content[0] not in ("'", '"'):
+        index = content.find(":")
+        return index if index >= 0 else None
+
+    quote = content[0]
+    escaped = False
+    index = 1
+    while index < len(content):
+        char = content[index]
+        if quote == '"' and escaped:
+            escaped = False
+        elif quote == '"' and char == "\\":
+            escaped = True
+        elif char == quote:
+            if quote == "'" and index + 1 < len(content) and content[index + 1] == quote:
+                index += 2
+                continue
+            quote = None
+        elif quote is None and char == ":":
+            return index
+        index += 1
+    return None
+
+
+def _parse_mapping_key(key_text, line_number):
+    if key_text.startswith(("'", '"')):
+        return _parse_quoted(key_text, line_number)
+    if not KEY_RE.fullmatch(key_text):
+        _error(line_number, f"invalid mapping key {key_text!r}")
+    return key_text
+
+
 def _parse_key_value(content, line_number):
-    if ":" not in content:
+    delimiter = _mapping_delimiter_index(content)
+    if delimiter is None:
+        if content.startswith(("'", '"')):
+            _parse_quoted(content, line_number)
         _error(line_number, "expected key: value")
-    key, value = content.split(":", 1)
-    key = key.strip()
-    if not KEY_RE.fullmatch(key):
-        _error(line_number, f"invalid mapping key {key!r}")
+    key_text = content[:delimiter].strip()
+    value = content[delimiter + 1 :]
+    key = _parse_mapping_key(key_text, line_number)
     if value and not value.startswith(" "):
         _error(line_number, "mapping values must be separated from ':' by a space")
     return key, value.strip()
@@ -226,7 +297,18 @@ def _is_list_item(content):
 
 
 def _is_mapping_entry(content):
-    return re.match(r"[A-Za-z_][A-Za-z0-9_.-]*:(?: |$)", content) is not None
+    delimiter = _mapping_delimiter_index(content)
+    if delimiter is None:
+        return False
+    key_text = content[:delimiter].strip()
+    value = content[delimiter + 1 :]
+    if value and not value.startswith(" "):
+        return False
+    try:
+        _parse_mapping_key(key_text, 1)
+    except YamlSubsetError:
+        return False
+    return True
 
 
 class _Parser:
@@ -241,38 +323,46 @@ class _Parser:
             _error(first.number, "top-level content must not be indented")
         if _is_list_item(first.content):
             _error(first.number, "top-level document must be a mapping")
-        data, index = self._parse_mapping(0, 0)
+        data, index = self._parse_mapping(0, 0, 1)
         if index != len(self.lines):
             line = self.lines[index]
             _error(line.number, "unexpected content")
         return data
 
-    def _parse_child(self, index, parent_indent):
-        if index >= len(self.lines) or self.lines[index].indent <= parent_indent:
+    def _parse_child(self, index, parent_indent, depth, allow_indentless_sequence=False):
+        if index >= len(self.lines):
             return None, index
         child = self.lines[index]
+        if allow_indentless_sequence and child.indent == parent_indent and _is_list_item(child.content):
+            if depth >= MAX_NESTING_DEPTH:
+                _error(child.number, f"nesting depth exceeds limit of {MAX_NESTING_DEPTH}")
+            return self._parse_sequence(index, parent_indent, depth + 1, indentless=True)
+        if child.indent <= parent_indent:
+            return None, index
         expected = parent_indent + 2
         if child.indent != expected:
             _error(child.number, f"unexpected indentation; expected {expected} spaces")
+        if depth >= MAX_NESTING_DEPTH:
+            _error(child.number, f"nesting depth exceeds limit of {MAX_NESTING_DEPTH}")
         if _is_list_item(child.content):
-            return self._parse_sequence(index, expected)
-        return self._parse_mapping(index, expected)
+            return self._parse_sequence(index, expected, depth + 1)
+        return self._parse_mapping(index, expected, depth + 1)
 
-    def _store_entry(self, mapping, key, raw_value, line_number, index, indent):
+    def _store_entry(self, mapping, key, raw_value, line_number, index, indent, depth):
         if key in mapping:
             _error(line_number, f"duplicate mapping key {key!r}")
         if raw_value:
             mapping[key] = _parse_scalar(raw_value, line_number)
             return index
-        mapping[key], index = self._parse_child(index, indent)
+        mapping[key], index = self._parse_child(index, indent, depth, allow_indentless_sequence=True)
         return index
 
-    def _parse_mapping(self, index, indent, initial=None):
+    def _parse_mapping(self, index, indent, depth, initial=None):
         mapping = {}
         if initial is not None:
             initial_line, initial_content = initial
             key, raw_value = _parse_key_value(initial_content, initial_line.number)
-            index = self._store_entry(mapping, key, raw_value, initial_line.number, index, indent)
+            index = self._store_entry(mapping, key, raw_value, initial_line.number, index, indent, depth)
 
         while index < len(self.lines):
             line = self.lines[index]
@@ -284,10 +374,10 @@ class _Parser:
                 _error(line.number, "cannot mix mapping entries and list items at the same indentation")
             key, raw_value = _parse_key_value(line.content, line.number)
             index += 1
-            index = self._store_entry(mapping, key, raw_value, line.number, index, indent)
+            index = self._store_entry(mapping, key, raw_value, line.number, index, indent, depth)
         return mapping, index
 
-    def _parse_sequence(self, index, indent):
+    def _parse_sequence(self, index, indent, depth, indentless=False):
         sequence = []
         while index < len(self.lines):
             line = self.lines[index]
@@ -296,19 +386,23 @@ class _Parser:
             if line.indent > indent:
                 _error(line.number, f"unexpected indentation; expected {indent} spaces")
             if not _is_list_item(line.content):
+                if indentless:
+                    break
                 _error(line.number, "cannot mix list items and mapping entries at the same indentation")
 
             payload = line.content[1:].strip()
             index += 1
             if not payload:
-                value, index = self._parse_child(index, indent)
+                value, index = self._parse_child(index, indent, depth)
                 if value is None:
                     _error(line.number, "empty block-list item")
                 sequence.append(value)
                 continue
 
             if _is_mapping_entry(payload):
-                value, index = self._parse_mapping(index, indent + 2, initial=(line, payload))
+                if depth >= MAX_NESTING_DEPTH:
+                    _error(line.number, f"nesting depth exceeds limit of {MAX_NESTING_DEPTH}")
+                value, index = self._parse_mapping(index, indent + 2, depth + 1, initial=(line, payload))
             else:
                 value = _parse_scalar(payload, line.number)
                 if index < len(self.lines) and self.lines[index].indent > indent:

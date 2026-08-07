@@ -252,6 +252,23 @@ warn_ratio: 0.8
         self.assertIsNone(caps["platforms"]["openclaw"]["context_per_file_chars"])
         self.assertEqual(caps["warn_ratio"], 0.8)
 
+    def test_yaml_subset_preserves_guard_sensitive_hash_suffixes(self):
+        parsed = self.module.parse_yaml_subset(
+            """path: SECRET.md#ignored
+host: bad@example.com#notachost
+max_chars: 5#0
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {
+                "path": "SECRET.md#ignored",
+                "host": "bad@example.com#notachost",
+                "max_chars": "5#0",
+            },
+        )
+
     def test_load_yaml_preserves_parser_line_number(self):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = write_file(
