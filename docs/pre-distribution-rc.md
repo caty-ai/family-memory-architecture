@@ -22,9 +22,9 @@ An RC claim with no commit-addressed evidence is not a claim; it is a placeholde
 | #124 D17: job owner registry + duplicate-writer lint | mechanism | OPEN | none in repo | **OUTSTANDING** |
 | #125 D1: pre-destruction flush-extract (extract-only) | mechanism | OPEN | none in repo | **OUTSTANDING** |
 | #128 family-hot-generate → `scripts/lib_atomic` migration | mechanism | OPEN | `lib_atomic` itself merged (PR #126, #121); migration not done | **OUTSTANDING** |
-| #54 mechanism side: stdlib clean-room, failure classes, canonical test discovery | mechanism | OPEN | content-lint v1 merged (PR #107); the manifest/config parser and unconditional lint test discovery landed in `2ee4de1`; clean-room and remaining failure-class evidence are still outstanding | **PARTIAL** |
+| #54 mechanism side: stdlib clean-room, failure classes, canonical test discovery | mechanism | OPEN | content-lint v1 merged (PR #107); the manifest/config parser and unconditional lint test discovery landed in `2ee4de1` (hardened in `1a23069`); clean-room and remaining failure-class evidence are still outstanding | **PARTIAL** |
 | #132 gitleaks fixture allowlist + negative machine gate | mechanism | OPEN | draft PR #137 open, unmerged | **OUTSTANDING** |
-| #133 stdlib manifest parser + lint failure classification | mechanism | IMPLEMENTED IN REPO | `scripts/lib_yamlsubset.py`, both lint integrations, and their unconditional tests landed in `2ee4de1` | **COMPLETE — implementation present; RC evidence tracked separately** |
+| #133 stdlib manifest parser + lint failure classification | mechanism | IMPLEMENTED IN REPO | `scripts/lib_yamlsubset.py`, both lint integrations, and their unconditional tests landed in `2ee4de1` (parser hardened in `1a23069`) | **COMPLETE — implementation present; RC evidence tracked separately** |
 | #134 Python 3.9 CLI compatibility + canonical all-tests runner | mechanism | OPEN | none in repo | **OUTSTANDING** |
 | #135 hermetic clean-room E2E + agent-a local synthetic canary | RC proof | OPEN | none in repo | **OUTSTANDING** |
 | #120 EPIC hardening wave 1 — implementation-ready checkpoint | checkpoint | OPEN | partially addressed: D10 `lib_atomic` (PR #126), D11 storage classes (PR #127), W3 liveness envelope (PR #119, #118) | **PARTIAL — checkpoint not reached** |
