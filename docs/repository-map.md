@@ -11,7 +11,7 @@ family-memory-architecture/
 ├── README.md            … 玄関（en/ja/zh/th の4言語）
 ├── INSTALL.md           … 導入の分岐板（AI に渡す / 手で入れる）
 ├── docs/                … 用途別ガイドと設計文書（このファイルもここ）
-├── scripts/             … 実働スクリプト23本＋テスト一式（lint 2本を除き標準ライブラリのみ）
+├── scripts/             … 実働スクリプト25本＋テスト一式（Python 標準ライブラリのみ）
 ├── manifests/           … 「何が存在してよいか」の許可リスト（お手本サンプル）
 ├── policies/            … 運用ポリシー（クラウド記憶の配分・ジョブの畳み方）
 ├── extensions/          … ランタイム別の実験的プラグイン
@@ -20,9 +20,9 @@ family-memory-architecture/
 
 ---
 
-## scripts/ — 実働スクリプト23本
+## scripts/ — 実働スクリプト25本
 
-CLI 22本＋共通ライブラリ1本。`content-lint` と `injection-lint` の2本だけ PyYAML が必要で、残りはすべて Python 3 標準ライブラリのみ（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
+CLI 22本＋共通ライブラリ3本。すべて外部パッケージ不要で、Python 3 標準ライブラリのみを使います（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
 
 ### 共有面（コア）
 
@@ -71,8 +71,10 @@ CLI 22本＋共通ライブラリ1本。`content-lint` と `injection-lint` の2
 | `capture-shipper` | OpenClaw の capture spool を秘密情報の赤字化を通してから送出 |
 | `save-candidate-suggest` | 会話 transcript から記憶保存の候補を提案（Claude Code Stop hook 用） |
 | `lib_atomic.py` | クラッシュ安全な状態ファイル書き込みの共通ヘルパ（ライブラリ） |
+| `lib_envfile.py` | 設定用 env ファイルを安全に読む共通ヘルパ（ライブラリ） |
+| `lib_yamlsubset.py` | lint 用 manifest/config の限定 YAML 構文を fail-closed で読む共通ヘルパ（ライブラリ） |
 
-テストは `python3 scripts/tests/run_tests.py` で一括実行できます（`test_write_guard.py` と `test_injection_lint.py` の2本は集計対象外なので個別に実行します）。
+テストは `python3 scripts/tests/run_tests.py` で一括実行できます（`test_write_guard.py` は集計対象外なので個別に実行します）。
 
 ---
 

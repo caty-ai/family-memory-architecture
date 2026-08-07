@@ -7,7 +7,7 @@
 ![An AI family sitting around a campfire under a starry sky. Fragments of memory rise from the fire as glowing shapes, shared by everyone around it. The heading reads Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
 ![python](https://img.shields.io/badge/python-3-blue)
 ![status](https://img.shields.io/badge/status-published-brightgreen)
 
@@ -93,7 +93,7 @@ The minimal setup needs only Python 3 and an empty folder. Everything else is an
 |---|---|
 | Runtime | ✅ Python 3.14 (verified with 3.14.3) ／ ⚠️ 3.13 and below unverified (3.9 measured with one test failure) |
 | OS | ✅ macOS (test suite verified) ／ ✅ Linux (server-side scripts in daily production use) |
-| Dependencies | ✅ None for the core (standard library only) ／ ⚠️ PyYAML for two guard lints only (content-lint, injection-lint) |
+| Dependencies | ✅ None (Python standard library only) |
 | Agent environments verified in real use | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | Environments planned for verification | ⚠️ Kimi Code ／ ⚠️ Codex |
 
@@ -267,7 +267,7 @@ That is every fact you need for a decision. The depth lives below.
 | Using cross-layer search `recall` | [docs/recall-usage.md](docs/recall-usage.md) |
 | Rules for ingesting into the search index | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | What the failure watch means | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| Where everything lives — directories and all 23 scripts | [docs/repository-map.md](docs/repository-map.md) |
+| Where everything lives — directories and all 25 scripts | [docs/repository-map.md](docs/repository-map.md) |
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Report a bug or vulnerability | [SECURITY.md](SECURITY.md) |
 | Allocation rules for cloud memory | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

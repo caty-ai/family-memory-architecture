@@ -16,17 +16,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-if importlib.util.find_spec("yaml") is not None:
-    import test_content_lint
-else:
-    # content-lint (the script under test) needs PyYAML; without it every one
-    # of its tests would error at setup, so skip the whole module loudly.
-    test_content_lint = None
-    print(
-        "WARNING: skipping content-lint tests — PyYAML is not installed "
-        "(pip install pyyaml). All other tests still run.",
-        file=sys.stderr,
-    )
+import test_content_lint
+import test_injection_lint
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1351,15 +1342,12 @@ if __name__ == "__main__":
         [
             unittest.defaultTestLoader.loadTestsFromTestCase(ScriptTests),
             unittest.defaultTestLoader.loadTestsFromModule(test_backup_dashboard),
-            *(
-                [unittest.defaultTestLoader.loadTestsFromModule(test_content_lint)]
-                if test_content_lint is not None
-                else []
-            ),
+            unittest.defaultTestLoader.loadTestsFromModule(test_content_lint),
             unittest.defaultTestLoader.loadTestsFromModule(test_capture_shipper),
             unittest.defaultTestLoader.loadTestsFromModule(test_fixture_smoke),
             unittest.defaultTestLoader.loadTestsFromModule(test_family_hot_generate),
             unittest.defaultTestLoader.loadTestsFromModule(test_hot_inbox_reader),
+            unittest.defaultTestLoader.loadTestsFromModule(test_injection_lint),
             unittest.defaultTestLoader.loadTestsFromModule(test_job_heartbeat),
             unittest.defaultTestLoader.loadTestsFromModule(test_jobs_framework),
             unittest.defaultTestLoader.loadTestsFromModule(test_lib_atomic),

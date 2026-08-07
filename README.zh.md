@@ -7,7 +7,7 @@
 ![星空下，一个 AI 家族围坐在篝火旁。记忆的碎片化作发光的图形从火中升起，被围坐的所有人共享。标题写着 Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
 ![python](https://img.shields.io/badge/python-3-blue)
 ![status](https://img.shields.io/badge/status-published-brightgreen)
 
@@ -93,7 +93,7 @@ flowchart LR
 |---|---|
 | 运行环境 | ✅ Python 3.14（已用 3.14.3 验证）／ ⚠️ 3.13 及以下未验证（3.9 实测有一个测试不通过） |
 | 操作系统 | ✅ macOS（已通过完整测试套件验证）／ ✅ Linux（服务器端脚本每天在生产环境运行） |
-| 依赖 | ✅ 核心无依赖（仅标准库）／ ⚠️ 仅两个守护 lint（content-lint、injection-lint）需要 PyYAML |
+| 依赖 | ✅ 无（仅使用 Python 标准库） |
 | 已在实际运行中验证的 AI Agent 环境 | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | 计划进行验证的环境 | ⚠️ Kimi Code ／ ⚠️ Codex |
 
@@ -266,7 +266,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 跨层搜索 `recall` 的用法 | [docs/recall-usage.md](docs/recall-usage.md) |
 | 向搜索索引投入数据的规则 | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | 故障监测的含义 | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| 仓库整体结构与 23 个脚本各自的作用 | [docs/repository-map.md](docs/repository-map.md) |
+| 仓库整体结构与 25 个脚本各自的作用 | [docs/repository-map.md](docs/repository-map.md) |
 | 想参与开发 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 发现了缺陷或漏洞 | [SECURITY.md](SECURITY.md) |
 | 云端记忆的分配规则 | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

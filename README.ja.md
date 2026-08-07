@@ -7,7 +7,7 @@
 ![星空の下、焚き火を囲んで座る AI ファミリー。焚き火からは記憶の欠片が光の図形になって立ちのぼり、全員がそれを共有している。見出しは Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
 ![python](https://img.shields.io/badge/python-3-blue)
 ![status](https://img.shields.io/badge/status-published-brightgreen)
 
@@ -93,7 +93,7 @@ flowchart LR
 |---|---|
 | ランタイム | ✅ Python 3.14（3.14.3 で実測）／ ⚠️ 3.13 以前は未検証（3.9 は一部テスト不合格を確認） |
 | OS | ✅ macOS（テスト一式を実測）／ ✅ Linux（サーバー側スクリプトを毎日実運用） |
-| 依存パッケージ | ✅ コアはなし（標準ライブラリのみ）／ ⚠️ ガードの lint 2本（content-lint・injection-lint）のみ PyYAML |
+| 依存パッケージ | ✅ なし（Python 標準ライブラリのみ） |
 | 実運用が確認できている AI エージェント環境 | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | 対応検証を予定している環境 | ⚠️ Kimi Code ／ ⚠️ Codex |
 
@@ -267,7 +267,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 横断検索 `recall` の使い方 | [docs/recall-usage.md](docs/recall-usage.md) |
 | 検索索引への投入ルール | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | 故障の見張りの意味 | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| リポジトリ全体の構造とスクリプト23本の役割 | [docs/repository-map.md](docs/repository-map.md) |
+| リポジトリ全体の構造とスクリプト25本の役割 | [docs/repository-map.md](docs/repository-map.md) |
 | 開発に参加したい | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 不具合・脆弱性を見つけた | [SECURITY.md](SECURITY.md) |
 | クラウド記憶の配分ルール | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

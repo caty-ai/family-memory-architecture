@@ -21,7 +21,7 @@ If you are unsure which side a report falls on, open it here and we will move it
 
 ## Checking your change
 
-The test suite needs only Python 3 — plus PyYAML for the content-lint tests (`content-lint` and `injection-lint` are the only two scripts with a dependency beyond the standard library):
+The test suite and every bundled script need only Python 3 and its standard library:
 
 ```bash
 python3 scripts/tests/run_tests.py          # aggregate suite
@@ -44,5 +44,5 @@ Before opening a pull request, confirm:
 ## Style
 
 - Write for someone who has not met this project before. Short sentences, concrete nouns, no jargon that the page has not already introduced.
-- Core scripts stay standard-library-only; `content-lint` and `injection-lint` (PyYAML) are the two sanctioned exceptions — do not add more. That constraint is a feature, not an accident.
+- Keep every script standard-library-only; do not add external package dependencies. That constraint is a feature, not an accident.
 - Prefer showing the boundary over promising the outcome. What a layer refuses to do is as informative as what it does.

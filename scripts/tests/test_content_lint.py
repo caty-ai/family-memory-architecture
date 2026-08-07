@@ -114,6 +114,117 @@ class ContentLintTests(unittest.TestCase):
             clean_path = write_file(tmp_path / "project-notes.md", "# Scratch\n")
             self.assertEqual(self.run_main("--config", config, clean_path)[0], 0)
 
+    def test_yaml_subset_accepts_realistic_content_config(self):
+        parsed = self.module.parse_yaml_subset(
+            """# A content-lint role matrix using both supported list forms.
+role_matrix:
+  IDENTITY.md: [values_emotional_guide, "tone # literal"] # inline comment
+  NOTES.md:
+    - misc
+heading_categories:
+  values_emotional_guide:
+    - values
+    - 'emotional guide'
+  misc: [scratch]
+"""
+        )
+
+        self.assertEqual(
+            parsed,
+            {
+                "role_matrix": {
+                    "IDENTITY.md": ["values_emotional_guide", "tone # literal"],
+                    "NOTES.md": ["misc"],
+                },
+                "heading_categories": {
+                    "values_emotional_guide": ["values", "emotional guide"],
+                    "misc": ["scratch"],
+                },
+            },
+        )
+
+    def test_yaml_subset_rejects_unsupported_or_malformed_constructs_with_line_numbers(self):
+        rejected = {
+            "tabs": "root:\n\tchild: value\n",
+            "anchor": "root: &base value\n",
+            "spaced anchor": "root: & base\n",
+            "alias": "root: *base\n",
+            "tag": "root: !str value\n",
+            "flow mapping": "root: {child: value}\n",
+            "document marker": "root: value\n---\nother: value\n",
+            "odd indentation": "root:\n   child: value\n",
+            "indentation jump": "root:\n    child: value\n",
+            "duplicate": "root: first\nroot: second\n",
+            "quote": 'root: "unterminated\n',
+            "inline list": "root: [one,, two]\n",
+            "tilde null": "root: ~\n",
+            "YAML yes": "root: yes\n",
+            "YAML NO": "root: NO\n",
+            "YAML On": "root: On\n",
+            "YAML OFF": "root: OFF\n",
+            "YAML True": "root: True\n",
+            "YAML NULL": "root: NULL\n",
+            "special float": "root: .nan\n",
+            "infinite float": "root: -.Inf\n",
+            "exponent": "root: 1e3\n",
+            "ISO date": "root: 2026-08-07\n",
+            "leading-zero integer": "root: 012\n",
+            "hex integer": "root: 0x10\n",
+            "underscored integer": "root: 1_000\n",
+            "leading-dot float": "root: .5\n",
+            "trailing-dot float": "root: 1.\n",
+            "NUL": "root: value\x00\n",
+            "control character": "root: value\nother: \x01bad\n",
+        }
+        expected_lines = {
+            "tabs": 2,
+            "anchor": 1,
+            "spaced anchor": 1,
+            "alias": 1,
+            "tag": 1,
+            "flow mapping": 1,
+            "document marker": 2,
+            "odd indentation": 2,
+            "indentation jump": 2,
+            "duplicate": 2,
+            "quote": 1,
+            "inline list": 1,
+            "tilde null": 1,
+            "YAML yes": 1,
+            "YAML NO": 1,
+            "YAML On": 1,
+            "YAML OFF": 1,
+            "YAML True": 1,
+            "YAML NULL": 1,
+            "special float": 1,
+            "infinite float": 1,
+            "exponent": 1,
+            "ISO date": 1,
+            "leading-zero integer": 1,
+            "hex integer": 1,
+            "underscored integer": 1,
+            "leading-dot float": 1,
+            "trailing-dot float": 1,
+            "NUL": 1,
+            "control character": 2,
+        }
+
+        for label, text in rejected.items():
+            with self.subTest(label=label):
+                with self.assertRaises(self.module.YamlSubsetError) as raised:
+                    self.module.parse_yaml_subset(text)
+                self.assertIn(f"line {expected_lines[label]}:", str(raised.exception))
+
+    def test_load_config_preserves_parser_line_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = write_file(
+                Path(tmp) / "ambiguous.yaml",
+                "role_matrix:\n  IDENTITY.md: yes\nheading_categories: {}\n",
+            )
+            with self.assertRaises(self.module.ContentLintError) as raised:
+                self.module.load_config(config)
+            self.assertIn("line 2:", str(raised.exception))
+
     def test_unreadable_and_non_utf8_files_are_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -211,6 +211,57 @@ warn_ratio: {warn_ratio}
                     with self.assertRaises(self.module.InjectionLintError):
                         self.module.load_platform_caps(manifest_dir)
 
+    def test_yaml_subset_accepts_realistic_manifest_and_platform_caps(self):
+        manifest = self.module.parse_yaml_subset(
+            """# A realistic local agent manifest.
+agent: agent-g
+platform: openclaw
+host: null
+workspace: ~/.openclaw/workspace
+files:
+  - path: MEMORY.md
+    role: memory
+    max_chars: 11000
+    shared: false
+    note: "literal # is not a comment"
+  - path: TOOLS.md
+    role: tools
+    max_chars: 8000
+rot:
+  as_of_ttl_days: 90
+  applies_to_roles: [memory, tools]
+report:
+  channel: hot-inbox
+  also: state-file
+"""
+        )
+        caps = self.module.parse_yaml_subset(
+            """platforms:
+  openclaw:
+    per_file_chars: 20000
+    context_per_file_chars: null
+    total_chars: 60000
+warn_ratio: 0.8
+"""
+        )
+
+        self.assertIsNone(manifest["host"])
+        self.assertIs(manifest["files"][0]["shared"], False)
+        self.assertEqual(manifest["files"][0]["note"], "literal # is not a comment")
+        self.assertEqual(manifest["rot"]["applies_to_roles"], ["memory", "tools"])
+        self.assertIsNone(caps["platforms"]["openclaw"]["context_per_file_chars"])
+        self.assertEqual(caps["warn_ratio"], 0.8)
+
+    def test_load_yaml_preserves_parser_line_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = write_file(
+                Path(tmp) / "ambiguous.yaml",
+                "agent: agent-g\nshared: ON\n",
+            )
+            with self.assertRaises(self.module.InjectionLintError) as raised:
+                self.module.load_yaml(manifest)
+            self.assertIn("line 2:", str(raised.exception))
+
     def test_fullwidth_as_of_date_warns_without_crashing(self):
         result = self.lint_text("fact (As  Of ２０２６-０７-０８)")
         messages = [item["message"] for item in result["findings"]]

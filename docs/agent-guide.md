@@ -23,11 +23,10 @@ Run these read-only checks and note the results for your final report:
 
 ```sh
 git --version
-command -v python3     # required — core scripts are stdlib-only Python 3
-                       # (only the two guard lints, content-lint and injection-lint, need PyYAML)
+command -v python3     # required — all bundled scripts are stdlib-only Python 3
 ```
 
-If `python3` is missing, stop and point the human at their platform's Python 3 install. Nothing else is required for the core.
+If `python3` is missing, stop and point the human at their platform's Python 3 install. No additional package is required for the bundled scripts.
 
 ## Step 1 — clone and prove the loop
 

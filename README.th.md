@@ -7,7 +7,7 @@
 ![ครอบครัว AI นั่งล้อมกองไฟใต้ท้องฟ้าเต็มไปด้วยดวงดาว เศษเสี้ยวของความทรงจำลอยขึ้นจากกองไฟเป็นรูปทรงเรืองแสงที่ทุกคนแบ่งปันร่วมกัน หัวเรื่องเขียนว่า Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20%2B%20optional%20PyYAML-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
 ![python](https://img.shields.io/badge/python-3-blue)
 ![status](https://img.shields.io/badge/status-published-brightgreen)
 
@@ -93,7 +93,7 @@ flowchart LR
 |---|---|
 | Runtime | ✅ Python 3.14 (ทดสอบจริงกับ 3.14.3) ／ ⚠️ 3.13 ลงไปยังไม่ได้ตรวจสอบ (3.9 พบเทสต์ไม่ผ่าน 1 รายการ) |
 | OS | ✅ macOS (ผ่านชุดทดสอบเต็ม) ／ ✅ Linux (สคริปต์ฝั่งเซิร์ฟเวอร์ทำงานจริงทุกวัน) |
-| Dependencies | ✅ แกนหลักไม่ต้องพึ่งอะไร (ใช้แค่ standard library) ／ ⚠️ เฉพาะ lint 2 ตัว (content-lint, injection-lint) ที่ต้องใช้ PyYAML |
+| Dependencies | ✅ ไม่มี (ใช้เฉพาะ Python standard library) |
 | สภาพแวดล้อม AI agent ที่ยืนยันจากการใช้งานจริง | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | สภาพแวดล้อมที่วางแผนจะตรวจสอบ | ⚠️ Kimi Code ／ ⚠️ Codex |
 
@@ -267,7 +267,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | การใช้การค้นหาข้ามชั้น `recall` | [docs/recall-usage.md](docs/recall-usage.md) |
 | กติกาการนำเข้าสู่ดัชนีค้นหา | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | ความหมายของการเฝ้าดูความล้มเหลว | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| โครงสร้างทั้งรีโปและหน้าที่ของสคริปต์ทั้ง 23 ตัว | [docs/repository-map.md](docs/repository-map.md) |
+| โครงสร้างทั้งรีโปและหน้าที่ของสคริปต์ทั้ง 25 ตัว | [docs/repository-map.md](docs/repository-map.md) |
 | อยากร่วมพัฒนา | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | พบบั๊กหรือช่องโหว่ | [SECURITY.md](SECURITY.md) |
 | กติกาการจัดสรรความทรงจำบนคลาวด์ | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

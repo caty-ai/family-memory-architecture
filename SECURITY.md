@@ -1,6 +1,6 @@
 # Security Policy
 
-Family Memory Architecture ships local scripts (Python 3, standard library only — except the two lint tools `content-lint` and `injection-lint`, which use PyYAML). It runs no daemon of its own and opens no network ports; the scripts read and write local files and, when the optional layers are configured, talk to a Meilisearch endpoint and a cloud memory API using keys you supply. Its security surface is what those scripts touch and what this repository might accidentally carry. Security reports are welcome for:
+Family Memory Architecture ships local scripts that use only Python 3's standard library. It runs no daemon of its own and opens no network ports; the scripts read and write local files and, when the optional layers are configured, talk to a Meilisearch endpoint and a cloud memory API using keys you supply. Its security surface is what those scripts touch and what this repository might accidentally carry. Security reports are welcome for:
 
 - Leaked credentials, tokens, or personal information anywhere in the repository or its git history
 - A way to make the transcriber, ingest, or posting scripts write outside their declared targets (path traversal, symlink tricks, manifest injection)
