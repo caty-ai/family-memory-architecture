@@ -76,7 +76,7 @@ git clone <このリポジトリ> && cd family-memory-architecture
 python3 scripts/tests/run_tests.py   # まずテストが全部通ることを確認
 ```
 
-> **メモ:** clone と実行は**ホームディレクトリ配下**で行ってください。`/tmp` や外付けボリュームなど、グループ所有が普段と異なる場所では、生成物の権限セルフチェックが安全側に倒れて exit 2 で止まります（故障ではなく仕様です）。また PyYAML が無い環境では、content-lint 系のテストだけが WARNING 付きでスキップされます（他は全部走ります）。
+> **メモ:** clone と実行は**ホームディレクトリ配下**で行うのが無難です。既定の生成物セルフチェックは、`/tmp` や外付けボリュームなどグループ所有が普段と異なる場所でも、現在のユーザー所有かつ `0600` を保てていれば通ります。`FMA_EXPECT_OWNER` で所有者を固定した運用では、不一致は引き続き exit 2 の停止要因です。また PyYAML が無い環境では、content-lint 系のテストだけが WARNING 付きでスキップされます（他は全部走ります）。
 
 主なスクリプト（コアは Python 標準ライブラリのみ。content-lint / injection-lint の2本だけ PyYAML が必要）:
 

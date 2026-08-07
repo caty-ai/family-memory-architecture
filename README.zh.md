@@ -148,7 +148,7 @@ Finally, show me the contents of the generated demo-vault/00_index/family-hot.md
 
 ### 自己动手运行
 
-请在主目录（home）下运行。在 `/tmp` 等组属关系与平常不同的位置，权限自检会偏向安全一侧、以 exit 2 停止——这是检查在正常工作，不是故障。
+建议在主目录（home）下运行。默认权限自检现在会接受 `/tmp` 这类组属关系与平常不同的位置，只要生成文件仍归当前用户所有并被强制为 `0600`；只有用 `FMA_EXPECT_OWNER` 固定了 owner:group 的部署，才会继续把 owner/group 不匹配视为硬失败。
 
 ```bash
 git clone https://github.com/caty-ai/family-memory-architecture

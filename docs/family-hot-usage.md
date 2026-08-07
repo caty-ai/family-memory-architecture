@@ -54,9 +54,12 @@ Agreed with Agent B's feasibility note on issue #28 (2026-07-06):
 2. Generated artifacts MUST remain mode `0600` and owned by the expected
    owner after every generation: `00_index/family-hot.md` and
    `00_index/family-hot.sources.json`. By default the expected owner is
-   whichever user runs the generator (the current process owner), which keeps
-   the self-check portable across machines. A deployment that runs the
-   generator under a dedicated account pins this invariant explicitly with
+   whichever user runs the generator (the current process owner), and the
+   default self-check validates uid + mode only because `0600` grants nothing
+   to the group. This keeps the self-check portable across machines even when
+   a directory such as `/tmp` or an external volume supplies a different gid.
+   A deployment that runs the generator under a dedicated account pins this
+   invariant explicitly with
    `FMA_EXPECT_OWNER="user:group"`; an unrecognized user/group name then fails
    closed instead of silently weakening the check. If the generator ever
    creates these files fresh, it must restore `0600` (and the expected

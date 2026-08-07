@@ -438,10 +438,11 @@ def write_atomic(path, data):
 
 
 def expected_artifact_owner():
-    """Return the expected generated-artifact owner/group.
+    """Return the expected generated-artifact owner/group policy.
 
-    The default expectation is the current process owner, which keeps the
-    permission self-check portable across machines. A deployment that runs the
+    By default, generated artifacts are expected to belong to the current
+    process owner, and the self-check validates only uid + mode because the
+    forced 0600 mode grants nothing to the group. A deployment that runs the
     generator under a dedicated account pins its server invariant explicitly
     with FMA_EXPECT_OWNER="user:group"; an unknown name then fails closed
     instead of silently weakening the check.
@@ -465,6 +466,7 @@ def expected_artifact_owner():
 
 def enforce_generated_artifact_permissions(paths):
     expected_uid, expected_gid, expected_user, expected_group = expected_artifact_owner()
+    owner_is_pinned = bool(os.environ.get("FMA_EXPECT_OWNER", "").strip())
     issues = []
     for path in paths:
         try:
@@ -485,7 +487,12 @@ def enforce_generated_artifact_permissions(paths):
         mode = stat.S_IMODE(st.st_mode)
         if mode != 0o600:
             issues.append(f"{path}: mode is {mode:04o}, expected 0600")
-        if (st.st_uid, st.st_gid) != (expected_uid, expected_gid):
+        owner_mismatch = (
+            (st.st_uid, st.st_gid) != (expected_uid, expected_gid)
+            if owner_is_pinned
+            else st.st_uid != expected_uid
+        )
+        if owner_mismatch:
             owner = f"{pwd.getpwuid(st.st_uid).pw_name}:{grp.getgrgid(st.st_gid).gr_name}"
             issues.append(f"{path}: owner is {owner}, expected {expected_user}:{expected_group}")
     return issues

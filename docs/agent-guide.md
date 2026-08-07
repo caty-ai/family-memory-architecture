@@ -38,7 +38,7 @@ cd family-memory-architecture
 
 Run the four demo commands from the [front page](../README.md#get-started) (post → generate → lint → read against a `demo-vault`). All four must exit 0. This proves the whole loop on this machine in under a minute. Delete `demo-vault` afterwards.
 
-> Run from a normal home-directory location. Under some temp directories (e.g. `/tmp` on macOS) files inherit a different group and the generator's permission self-check will correctly refuse.
+> Run from a normal home-directory location when possible. The default permission self-check now tolerates temp directories whose inherited group differs (for example `/tmp` on macOS) because the generator forces the artifacts back to `0600`; only a pinned `FMA_EXPECT_OWNER` deployment still refuses owner/group mismatches.
 
 ## Step 2 — create the real vault
 
@@ -119,7 +119,7 @@ Set up complete. Here's what that means:
 
 | Symptom | Meaning | Do |
 | --- | --- | --- |
-| `generated artifact permission self-check failed: … owner is …` | Running under a directory with unexpected group ownership (e.g. `/tmp`) | Re-run under the human's home directory |
+| `generated artifact permission self-check failed: … owner is …` | The artifact uid is wrong, or a pinned `FMA_EXPECT_OWNER` deployment saw an owner/group mismatch | Re-run as the expected user, or fix the pinned owner/group setting |
 | `family-hot lint` fails after someone edited `family-hot.md` by hand | The single-writer contract caught a hand edit — working as designed | Re-run `family-hot-generate`; never hand-edit the generated page |
 | `hot-inbox-post` exits refusing your event | The secret scan matched a credential-like string | Remove the secret-like content; post a pointer instead of the value |
 | Clone fails with auth error | The repo is private and this account isn't invited | Tell the human; they need access before you can proceed |

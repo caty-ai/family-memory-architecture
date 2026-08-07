@@ -41,6 +41,16 @@ class FamilyHotGenerateTests(unittest.TestCase):
         loader.exec_module(module)
         return module
 
+    def mutated_stat_result(self, stat_result, *, mode=None, uid=None, gid=None):
+        values = list(stat_result)
+        if mode is not None:
+            values[0] = (stat_result.st_mode & ~0o777) | mode
+        if uid is not None:
+            values[4] = uid
+        if gid is not None:
+            values[5] = gid
+        return os.stat_result(values)
+
     def inbox(self, vault):
         path = Path(vault) / "00_index" / "hot-inbox"
         path.mkdir(parents=True, exist_ok=True)
@@ -585,6 +595,95 @@ class FamilyHotGenerateTests(unittest.TestCase):
             self.assertEqual(heartbeat["status"], "fail")
             self.assertEqual(len(heartbeat["reason"]), 300)
             self.assertTrue(heartbeat["reason"].startswith("runtime error:"))
+
+    def test_default_permission_check_accepts_gid_mismatch(self):
+        module = self.load_script_module("family_hot_generate_default_gid", FAMILY_HOT_GENERATE_SCRIPT)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "family-hot.md"
+            path.write_text("ok\n", encoding="utf-8")
+            current_gid = os.getgid()
+            secondary_gid = next((gid for gid in os.getgroups() if gid != current_gid), None)
+            with mock.patch.object(module.os, "geteuid", return_value=1):
+                if secondary_gid is not None:
+                    try:
+                        os.chown(path, -1, secondary_gid)
+                    except OSError:
+                        secondary_gid = None
+                if secondary_gid is not None:
+                    issues = module.enforce_generated_artifact_permissions([path])
+                else:
+                    fake_gid = current_gid + 1
+                    original_getgrgid = module.grp.getgrgid
+
+                    def fake_getgrgid(gid):
+                        if gid == fake_gid:
+                            return type("GrpEntry", (), {"gr_name": "expected-group"})
+                        return original_getgrgid(gid)
+
+                    with mock.patch.object(module.os, "getgid", return_value=fake_gid):
+                        with mock.patch.object(module.grp, "getgrgid", side_effect=fake_getgrgid):
+                            issues = module.enforce_generated_artifact_permissions([path])
+            self.assertEqual(issues, [])
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_default_permission_check_rejects_uid_mismatch(self):
+        module = self.load_script_module("family_hot_generate_default_uid", FAMILY_HOT_GENERATE_SCRIPT)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "family-hot.md"
+            path.write_text("ok\n", encoding="utf-8")
+            fake_uid = os.getuid() + 1
+            original_getpwuid = module.pwd.getpwuid
+
+            def fake_getpwuid(uid):
+                if uid == fake_uid:
+                    return type("PwdEntry", (), {"pw_name": "expected-user"})
+                return original_getpwuid(uid)
+
+            with mock.patch.object(module.os, "geteuid", return_value=1):
+                with mock.patch.object(module.os, "getuid", return_value=fake_uid):
+                    with mock.patch.object(module.pwd, "getpwuid", side_effect=fake_getpwuid):
+                        issues = module.enforce_generated_artifact_permissions([path])
+            self.assertEqual(len(issues), 1)
+            self.assertIn("owner is", issues[0])
+            self.assertIn("expected expected-user", issues[0])
+
+    def test_default_permission_check_rejects_non_0600_mode(self):
+        module = self.load_script_module("family_hot_generate_default_mode", FAMILY_HOT_GENERATE_SCRIPT)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "family-hot.md"
+            path.write_text("ok\n", encoding="utf-8")
+            actual_stat = path.stat()
+            wrong_mode_stat = self.mutated_stat_result(actual_stat, mode=0o640)
+            original_path_stat = Path.stat
+
+            def fake_stat(self):
+                if self == path:
+                    return wrong_mode_stat
+                return original_path_stat(self)
+
+            with mock.patch.object(module.os, "geteuid", return_value=1):
+                with mock.patch("pathlib.Path.stat", autospec=True, side_effect=fake_stat):
+                    issues = module.enforce_generated_artifact_permissions([path])
+            self.assertEqual(issues, [f"{path}: mode is 0640, expected 0600"])
+
+    def test_pinned_permission_check_still_rejects_group_mismatch(self):
+        module = self.load_script_module("family_hot_generate_pinned_gid", FAMILY_HOT_GENERATE_SCRIPT)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "family-hot.md"
+            path.write_text("ok\n", encoding="utf-8")
+            current_uid = path.stat().st_uid
+            current_gid = path.stat().st_gid
+            expected_gid = current_gid + 1
+            fake_pwd = type("PwdEntry", (), {"pw_uid": current_uid})
+            fake_grp = type("GrpEntry", (), {"gr_gid": expected_gid})
+            with mock.patch.object(module.os, "geteuid", return_value=1):
+                with mock.patch.dict(module.os.environ, {"FMA_EXPECT_OWNER": "artifact-user:artifact-group"}, clear=False):
+                    with mock.patch.object(module.pwd, "getpwnam", return_value=fake_pwd):
+                        with mock.patch.object(module.grp, "getgrnam", return_value=fake_grp):
+                            issues = module.enforce_generated_artifact_permissions([path])
+            self.assertEqual(len(issues), 1)
+            self.assertIn("owner is", issues[0])
+            self.assertIn("expected artifact-user:artifact-group", issues[0])
 
     def test_ledger_write_failure_preserves_prior_output(self):
         with tempfile.TemporaryDirectory() as vault:

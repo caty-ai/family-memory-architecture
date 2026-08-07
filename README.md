@@ -149,7 +149,7 @@ choice before installing it.
 
 ### Run it yourself
 
-Run this under your home directory. In places where group ownership differs from usual (such as `/tmp`), the permission self-check errs on the safe side and stops with exit 2 — that is the check working, not a fault.
+Run this under your home directory. The default permission self-check now accepts directories whose group ownership differs from usual (such as `/tmp`) as long as the generated files remain owned by the current user and forced to `0600`; only a pinned `FMA_EXPECT_OWNER` deployment still treats an owner/group mismatch as a hard failure.
 
 ```bash
 git clone https://github.com/caty-ai/family-memory-architecture
