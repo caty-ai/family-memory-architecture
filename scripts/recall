@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lib_envfile
+
 
 DEFAULT_LAYERS = ("sm", "meili", "grep")
 DEFAULT_SM_CONTAINER = "personal-agent-a"
@@ -65,6 +69,12 @@ def parse_layers(text):
 
 def parse_supermemory_env(path=SM_ENV_PATH):
     env_path = expand_path(path)
+    try:
+        lib_envfile.ensure_private_file(env_path)
+    except lib_envfile.PrivateFileError as exc:
+        raise RecallError(
+            f"invalid Supermemory env file: {exc}; use a real user-owned env file and chmod 600 it"
+        ) from exc
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:

@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -27,6 +28,11 @@ def load_recall_module():
 class RecallTests(unittest.TestCase):
     def setUp(self):
         self.recall = load_recall_module()
+
+    def write_private_supermemory_env(self, path, contents):
+        path.write_text(contents, encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
 
     def run_recall(self, query="needle", layers=("sm", "meili", "grep"), local_only=False, limit=8, adapters=None, timeout=None):
         tmp = tempfile.TemporaryDirectory()
@@ -55,14 +61,47 @@ class RecallTests(unittest.TestCase):
     def test_supermemory_env_strips_surrounding_quotes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "env"
-            path.write_text('SUPERMEMORY_CC_API_KEY="sk-test-value"\n', encoding="utf-8")
+            self.write_private_supermemory_env(path, 'SUPERMEMORY_CC_API_KEY="sk-test-value"\n')
             self.assertEqual(self.recall.parse_supermemory_env(path), "sk-test-value")
 
     def test_supermemory_env_strips_surrounding_single_quotes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "env"
-            path.write_text("SUPERMEMORY_CC_API_KEY='sk-test-value'\n", encoding="utf-8")
+            self.write_private_supermemory_env(path, "SUPERMEMORY_CC_API_KEY='sk-test-value'\n")
             self.assertEqual(self.recall.parse_supermemory_env(path), "sk-test-value")
+
+    def test_supermemory_env_accepts_private_0600_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "env"
+            self.write_private_supermemory_env(path, 'SUPERMEMORY_CC_API_KEY="sk-test-value"\n')
+
+            self.assertEqual(self.recall.parse_supermemory_env(path), "sk-test-value")
+
+    def test_supermemory_env_rejects_non_0600_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "env"
+            path.write_text("SUPERMEMORY_CC_API_KEY=sk-test-value\n", encoding="utf-8")
+            os.chmod(path, 0o644)
+
+            with self.assertRaisesRegex(
+                self.recall.RecallError,
+                r"invalid Supermemory env file: env file mode is 0644, expected 0600; use a real user-owned env file and chmod 600 it",
+            ):
+                self.recall.parse_supermemory_env(path)
+
+    def test_supermemory_env_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target-env"
+            self.write_private_supermemory_env(target, 'SUPERMEMORY_CC_API_KEY="sk-test-value"\n')
+            path = root / "env"
+            path.symlink_to(target)
+
+            with self.assertRaisesRegex(
+                self.recall.RecallError,
+                r"invalid Supermemory env file: env file is a symlink; use a real user-owned env file and chmod 600 it",
+            ):
+                self.recall.parse_supermemory_env(path)
 
     def test_search_adapters_guard_leading_dash_query(self):
         completed = mock.Mock()

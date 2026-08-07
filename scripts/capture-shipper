@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -15,6 +14,10 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import lib_envfile
 
 
 DEFAULT_API_BASE = "https://api.supermemory.ai"
@@ -64,20 +67,11 @@ def is_safe_metadata_ts(value):
     return is_safe_identifier(value) and bool(DAY_RE.fullmatch(value[:10]))
 
 
-def ensure_private_file(path):
-    try:
-        st = path.stat()
-    except OSError as exc:
-        raise CaptureShipperError(f"cannot stat env file: {exc}") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise CaptureShipperError("env file is not a regular file")
-    actual = stat.S_IMODE(st.st_mode)
-    if actual != 0o600:
-        raise CaptureShipperError(f"env file mode is {actual:04o}, expected 0600")
-
-
 def parse_env_file(path):
-    ensure_private_file(path)
+    try:
+        lib_envfile.ensure_private_file(path)
+    except lib_envfile.PrivateFileError as exc:
+        raise CaptureShipperError(str(exc)) from exc
     values = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()

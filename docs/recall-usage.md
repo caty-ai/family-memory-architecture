@@ -6,7 +6,7 @@
 scripts/recall "family-hot" --local-only --limit 3
 ```
 
-Default layers are `sm,meili,grep`. Use `--local-only` to skip Supermemory, or `--layers meili,grep` to select layers explicitly. Supermemory uses `~/.config/supermemory/env` and reads `SUPERMEMORY_CC_API_KEY`, with surrounding shell quotes stripped before authentication. Since that file holds a live API key, `chmod 600 ~/.config/supermemory/env` after creating it.
+Default layers are `sm,meili,grep`. Use `--local-only` to skip Supermemory, or `--layers meili,grep` to select layers explicitly. Supermemory uses `~/.config/supermemory/env` and reads `SUPERMEMORY_CC_API_KEY`, with surrounding shell quotes stripped before authentication. Matching `capture-shipper`, recall requires that file to be a regular, non-symlink file owned by the current user with mode `0600` (`chmod 600 ~/.config/supermemory/env`); invalid files are rejected before any API call.
 
 The `meili` layer is not a bundled search engine; it shells out to an external search wrapper (see [Overriding defaults](#overriding-defaults) below) that must return JSON on its own. If that wrapper is not set up, the `meili` layer fails gracefully (reported as an errored layer in the output) and `recall` still returns results from the `sm` and `grep` layers.
 

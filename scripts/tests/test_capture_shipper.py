@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -368,6 +369,34 @@ class CaptureShipperTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("expected 0600", result.stderr)
+
+    def test_env_file_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spool = root / "spool"
+            write_record(spool / "2026-07-07.jsonl", content="hello")
+            target = self.write_env(root / "target-env", "https://supermemory.test")
+            env_file = root / "env"
+            env_file.symlink_to(target)
+
+            result = self.run_script("--spool", spool, "--env-file", env_file)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("env file is a symlink", result.stderr)
+
+    def test_env_file_owner_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = self.write_env(root / "env", "https://supermemory.test")
+            module = load_module()
+            file_uid = env_file.stat().st_uid
+
+            with mock.patch.object(module.lib_envfile.os, "getuid", return_value=file_uid + 1):
+                with self.assertRaisesRegex(
+                    module.CaptureShipperError,
+                    rf"env file uid is {file_uid}, expected {file_uid + 1}",
+                ):
+                    module.parse_env_file(env_file)
 
     def test_retry_on_5xx_then_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
