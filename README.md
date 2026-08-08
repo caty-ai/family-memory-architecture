@@ -274,6 +274,14 @@ That is every fact you need for a decision. The depth lives below.
 
 Where this repository stands in the bigger picture comes next.
 
+---
+
+<a id="family-os"></a>
+
+## Part of Family OS
+
+This repository is a member of **[Family OS](https://github.com/caty-ai/family-os)** — the overall map for running multiple AI agents as one family. It works on its own, and it becomes stronger combined with the others.
+
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -294,14 +302,6 @@ Part of the **Caty AI family** — open tools for running a family of AI agents.
 | Horizontal | [Sitter](https://github.com/caty-ai/sitter) | Babysits delegated agent runs — watches, keeps evidence, restarts | published, MIT |
 
 <!-- family:generated:family-footer:end -->
-
----
-
-<a id="family-os"></a>
-
-## Part of Family OS
-
-This repository is a member of **[Family OS](https://github.com/caty-ai/family-os)** — the overall map for running multiple AI agents as one family. It works on its own, and it becomes stronger combined with the others — the full module table lives in the family footer at the end of this page.
 
 The rules for developing in parallel as a family live in the [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook). And connecting never moves authority: FMA shares information; it does not drive other agents.
 
