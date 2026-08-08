@@ -273,6 +273,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 接下来，先让你看看这个仓库在整体图景中站在哪个位置。
 
+---
+
+<a id="family-os"></a>
+
+## Family OS 的一员
+
+本仓库是 **[Family OS](https://github.com/caty-ai/family-os)** —— 把多个 AI Agent 当作一个家族来运营的整体地图 —— 的成员之一。它可以单独使用，但与其他成员组合起来会发挥更大的力量。
+
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -293,14 +301,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 横轴 | [Sitter](https://github.com/caty-ai/sitter) | 替你盯着委派出去的智能体 — 监视、留证、重启 | 已公开・MIT |
 
 <!-- family:generated:family-footer:end -->
-
----
-
-<a id="family-os"></a>
-
-## Family OS 的一员
-
-本仓库是 **[Family OS](https://github.com/caty-ai/family-os)** —— 把多个 AI Agent 当作一个家族来运营的整体地图 —— 的成员之一。它可以单独使用，但与其他成员组合起来会发挥更大的力量 —— 完整的模块一览表在本页末尾的家族页脚中。
 
 家族并行开发的规则在 [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook)。而且，连接不会转移执行权限：FMA 只共享信息，不驱动其他 Agent。
 

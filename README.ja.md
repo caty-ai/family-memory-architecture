@@ -274,6 +274,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 このリポジトリが全体のどこに立つのかも、先に見せておきます。
 
+---
+
+<a id="family-os"></a>
+
+## Family OS の一員です
+
+このリポジトリは、複数の AI エージェントをひとつの家族として運用するための全体地図 **[Family OS](https://github.com/caty-ai/family-os)** の一員です。単独でそのまま使えますが、組み合わせるとさらに力を発揮します。
+
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -294,14 +302,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 横軸 | [Sitter](https://github.com/caty-ai/sitter) | 委譲したエージェント実行の見張り番 — 監視・証拠の記録・再起動 | 公開・MIT |
 
 <!-- family:generated:family-footer:end -->
-
----
-
-<a id="family-os"></a>
-
-## Family OS の一員です
-
-このリポジトリは、複数の AI エージェントをひとつの家族として運用するための全体地図 **[Family OS](https://github.com/caty-ai/family-os)** の一員です。単独でそのまま使えますが、組み合わせるとさらに力を発揮します — モジュールの一覧表はこのページ末尾のファミリーフッターにあります。
 
 家族として並行開発するときのルールは [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook) にあります。そして、つないでも実行の権限は移りません。FMA は情報を共有するだけで、他のエージェントを動かしません。
 

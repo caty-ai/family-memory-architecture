@@ -274,6 +274,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 ต่อไป มาดูกันว่ารีโปนี้ยืนอยู่ตรงไหนของภาพรวมทั้งหมด
 
+---
+
+<a id="family-os"></a>
+
+## เป็นส่วนหนึ่งของ Family OS
+
+รีโปนี้เป็นสมาชิกของ **[Family OS](https://github.com/caty-ai/family-os)** — แผนที่ภาพรวมสำหรับการดูแลเอเจนต์ AI หลายตัวเป็นครอบครัวเดียวกัน มันใช้งานเดี่ยวๆ ได้เลย แต่จะยิ่งมีพลังเมื่อประกอบกับตัวอื่น
+
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -294,14 +302,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | แกนนอน | [Sitter](https://github.com/caty-ai/sitter) | พี่เลี้ยงของงานที่มอบหมายให้เอเจนต์ — เฝ้าดู เก็บหลักฐาน และรีสตาร์ต | เปิดแล้ว・MIT |
 
 <!-- family:generated:family-footer:end -->
-
----
-
-<a id="family-os"></a>
-
-## เป็นส่วนหนึ่งของ Family OS
-
-รีโปนี้เป็นสมาชิกของ **[Family OS](https://github.com/caty-ai/family-os)** — แผนที่ภาพรวมสำหรับการดูแลเอเจนต์ AI หลายตัวเป็นครอบครัวเดียวกัน มันใช้งานเดี่ยวๆ ได้เลย แต่จะยิ่งมีพลังเมื่อประกอบกับตัวอื่น — ตารางโมดูลฉบับเต็มอยู่ในส่วนท้ายของหน้านี้ (family footer)
 
 กติกาสำหรับการพัฒนาแบบขนานทั้งครอบครัวอยู่ใน [Family Dev Handbook](https://github.com/caty-ai/family-dev-handbook) และการเชื่อมต่อไม่ได้ย้ายอำนาจการทำงาน: FMA แค่แชร์ข้อมูล ไม่ได้สั่งการ agent ตัวอื่น
 
