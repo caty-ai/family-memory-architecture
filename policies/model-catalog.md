@@ -32,14 +32,14 @@
 
 - **merge は各 family のオーナー専決**（tier 構成・順序・status はコスト/能力/好みの判断= R-3 オーナー専決領域）。
 - **family PR front door**: 提案は誰でも PR で出せる（merge はオーナーのみ）。
-- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / public-snapshot 除外宣言の存在検査。
+- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / public-snapshot 除外節（本 policy の当該見出し）の存在検査。除外**ファイル**自体の存在検査は配布ゲート側の責務（下記 §public-snapshot 除外）。
 - **理由つき N/A（ゲート一覧との差分・LC-1 つき）**: ①**未知 id / union check** — メンバー設定が参照する id 集合は共有データ面から見えないため P1 では検査不能。member-state に `referenced_ids` を足して実装する（各 family の private follow-up Issue・LC-1= 次のカタログ改訂 or 最初の追加メンバー採用）②**conformance vectors 通過** — vectors は法側で公開後に CI へ組み込む。
 - **緊急降格 fast path**: 事由つき retire はオーナー directive+期限で即時（静かな reorder と区別）。retired 行は削除せず `status: retired` で残す（監査）。
 - 同意の実体は **per-member pinned adoption**（handbook v0.11.0）: merge は誰のホストの既定も変えない。メンバーが adopt するまで動かない。
 
 ## public-snapshot 除外
 
-private deployment が実名を含むカタログを持つ場合は public-snapshot 生成対象から**除外リストで明示的に外す**。配布ゲートで実名混入= FAIL。除外宣言の正本: `policies/public-snapshot-exclusions.md`。配布ゲートへの除外検査の機械組み込みは各 family の private follow-up Issue とし、それまでは手動 runbook に除外手順を明記する。
+private deployment が実名を含むカタログを持つ場合は public-snapshot 生成対象から**除外リストで明示的に外す**。配布ゲートで実名混入= FAIL。除外宣言の様式の正本: `policies/public-snapshot-exclusions.md`（宣言パターン — private deployment はこれを実リストとして具体化する）。配布ゲートへの除外検査の機械組み込みは各 family の private follow-up Issue とし、それまでは手動 runbook に除外手順を明記する。
 
 - ゲートの執行形の注記: CI workflow は path-filter つきのため、branch protection の required check に据える場合は無関係 PR の pending 挙動をオーナーが設定時に確認する（手動 `workflow_dispatch` 起動も可能にしてある）。
 

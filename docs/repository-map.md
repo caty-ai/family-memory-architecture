@@ -11,18 +11,18 @@ family-memory-architecture/
 ├── README.md            … 玄関（en/ja/zh/th の4言語）
 ├── INSTALL.md           … 導入の分岐板（AI に渡す / 手で入れる）
 ├── docs/                … 用途別ガイドと設計文書（このファイルもここ）
-├── scripts/             … 実働スクリプト25本＋テスト一式（Python 標準ライブラリのみ）
+├── scripts/             … 実働スクリプト26本＋テスト一式（Python 標準ライブラリのみ）
 ├── manifests/           … 「何が存在してよいか」の許可リスト（お手本サンプル）
-├── policies/            … 運用ポリシー（クラウド記憶の配分・ジョブの畳み方）
+├── policies/            … 運用ポリシー（クラウド記憶の配分・ジョブの畳み方・モデルカタログ運用）
 ├── extensions/          … ランタイム別の実験的プラグイン
 └── assets/              … README 用の画像
 ```
 
 ---
 
-## scripts/ — 実働スクリプト25本
+## scripts/ — 実働スクリプト26本
 
-CLI 22本＋共通ライブラリ3本。すべて外部パッケージ不要で、Python 3 標準ライブラリのみを使います（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
+CLI 23本＋共通ライブラリ3本。すべて外部パッケージ不要で、Python 3 標準ライブラリのみを使います（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
 
 ### 共有面（コア）
 
@@ -58,6 +58,7 @@ CLI 22本＋共通ライブラリ3本。すべて外部パッケージ不要で�
 | `secret-scan` | pre-commit の秘密スキャナ（staged diff／ファイルツリー） |
 | `vault-lint` | vault のリンク切れ・レビュー漂流・秘密混入の検査 |
 | `write-guard` | 「この情報はどこに書くか」の判定機 |
+| `model-catalog-check` | モデルカタログ・member-state・カタログ policy の fail-closed 検査器（CI ゲート） |
 | `overlap-lint` | 毎セッション固定注入の中の事実重複を検出 |
 | `injection-budget-check` | 固定注入のバイト予算を manifest と突合 |
 | `injection-lint` | エージェント別注入 manifest のサイズ・鮮度検査 |
@@ -111,5 +112,6 @@ CLI 22本＋共通ライブラリ3本。すべて外部パッケージ不要で�
 | 「どこに書くか」の判定ルール | [memory-write-guard-spec.md](memory-write-guard-spec.md) |
 | 注入予算と重複排除の考え方 | [dedupe-mapping.md](dedupe-mapping.md) |
 | クラウド記憶の配分ルール | [../policies/supermemory-allocation.md](../policies/supermemory-allocation.md) |
+| モデルカタログの運用規約 | [../policies/model-catalog.md](../policies/model-catalog.md) |
 | 配布前の準備チェック | [pre-distribution-rc.md](pre-distribution-rc.md)・[distribution-gate.md](distribution-gate.md) |
 | Family OS 側との連携契約 | [family-os-liveness-contract.md](family-os-liveness-contract.md) |
