@@ -270,6 +270,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 想参与开发 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 发现了缺陷或漏洞 | [SECURITY.md](SECURITY.md) |
 | 云端记忆的分配规则 | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
+| 模型目录的运用规约（层级・选出・使用时 stamp・CI 门禁） | [policies/model-catalog.md](policies/model-catalog.md) |
 
 接下来，先让你看看这个仓库在整体图景中站在哪个位置。
 

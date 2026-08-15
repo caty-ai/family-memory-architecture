@@ -271,6 +271,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | อยากร่วมพัฒนา | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | พบบั๊กหรือช่องโหว่ | [SECURITY.md](SECURITY.md) |
 | กติกาการจัดสรรความทรงจำบนคลาวด์ | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
+| กติกาการใช้งานแค็ตตาล็อกโมเดล (ชั้น การคัดเลือก stamp ตอนใช้งาน เกต CI) | [policies/model-catalog.md](policies/model-catalog.md) |
 
 ต่อไป มาดูกันว่ารีโปนี้ยืนอยู่ตรงไหนของภาพรวมทั้งหมด
 

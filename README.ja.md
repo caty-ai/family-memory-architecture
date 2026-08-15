@@ -271,6 +271,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 開発に参加したい | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 不具合・脆弱性を見つけた | [SECURITY.md](SECURITY.md) |
 | クラウド記憶の配分ルール | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
+| モデルカタログの運用規約（枠・選出・使用時 stamp・CI ゲート） | [policies/model-catalog.md](policies/model-catalog.md) |
 
 このリポジトリが全体のどこに立つのかも、先に見せておきます。
 
