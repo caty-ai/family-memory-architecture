@@ -271,6 +271,7 @@ That is every fact you need for a decision. The depth lives below.
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Report a bug or vulnerability | [SECURITY.md](SECURITY.md) |
 | Allocation rules for cloud memory | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
+| Model-catalog policy (tiers, selection, usage-time stamp, CI gate) | [policies/model-catalog.md](policies/model-catalog.md) |
 
 Where this repository stands in the bigger picture comes next.
 
