@@ -1,0 +1,45 @@
+name: Model catalog check
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "manifests/**"
+      - "policies/**"
+      - "scripts/model-catalog-check"
+      - "scripts/tests/test_model_catalog.py"
+      - "scripts/tests/run_tests.py"
+      - ".github/workflows/catalog-check.yml"
+  pull_request:
+    paths:
+      - "manifests/**"
+      - "policies/**"
+      - "scripts/model-catalog-check"
+      - "scripts/tests/test_model_catalog.py"
+      - "scripts/tests/run_tests.py"
+      - ".github/workflows/catalog-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Validate catalog and member adoption
+        run: python3 scripts/model-catalog-check
+      - name: Require revision metadata for catalog changes
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          if git cat-file -e origin/main:manifests/model-catalog.yaml 2>/dev/null; then
+            git show origin/main:manifests/model-catalog.yaml > /tmp/baseline.yaml
+            scripts/model-catalog-check --baseline /tmp/baseline.yaml
+          else
+            echo "First publication: origin/main has no model catalog; skipping revision-bump comparison."
+          fi
+      - name: Run catalog tests without site packages
+        run: python3 -S scripts/tests/test_model_catalog.py

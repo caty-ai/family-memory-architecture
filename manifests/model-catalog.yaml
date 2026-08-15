@@ -1,0 +1,110 @@
+# sample family model catalog — non-normative data plane (MoA v2.1)
+# Law: family-dev-handbook v0.11.0 L1-10/L1-11. This catalog can neither legalise
+# a seat the law forbids nor make usable a model the member cannot verify live.
+# Eligibility is won by the member's configuration; seat counts and constraints
+# are won by the handbook. No panels are named here; no availability fields exist.
+# This public artifact is a sample; real model data belongs on each family's private surface.
+revision: 1
+date: 2026-08-15
+revision_effective_after: 2026-08-22  # staleness bound: selectors fail closed past this on older digests
+changelog: >
+  r1 (2026-08-15): initial abstract sample publication. Nine placeholder rows
+  demonstrate priority and substitute tiers, current and trial states, same-vendor
+  escalation, and training-contributor handling. Real model data belongs on each
+  family's private surface.
+blast_radius: >
+  Public sample only — this catalog does not configure real seats or change any
+  family deployment. Each family publishes and adopts real data on its private surface.
+models:
+  - id: vendor-a-model-1
+    lineage: {family: family-a, vendor: vendor-a}
+    tier: priority
+    rank: 1
+    status: current
+    quorum_eligible: true
+    cost_class: subscription
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-b-model-1
+    lineage: {family: family-b, vendor: vendor-b}
+    tier: priority
+    rank: 2
+    status: current
+    quorum_eligible: true
+    cost_class: subscription
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-c-model-1
+    lineage: {family: family-c, vendor: vendor-c}
+    tier: priority
+    rank: 3
+    status: current
+    quorum_eligible: true
+    cost_class: subscription
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-d-model-1
+    lineage: {family: family-d, vendor: vendor-d}
+    tier: priority
+    rank: 4
+    status: current
+    quorum_eligible: true
+    cost_class: subscription
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-e-model-1
+    lineage: {family: family-e, vendor: vendor-e}
+    tier: substitute
+    rank: 1
+    status: current
+    quorum_eligible: true
+    cost_class: cheap-api
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-c-model-2
+    lineage: {family: family-c, vendor: vendor-c}
+    tier: substitute
+    rank: 2
+    status: current
+    quorum_eligible: true
+    cost_class: expensive
+    escalation_only: true  # sample family-wide policy (heavy reasoning only), not availability
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-f-model-1
+    lineage: {family: family-f, vendor: vendor-f}
+    tier: substitute
+    rank: 3
+    status: current
+    quorum_eligible: true
+    cost_class: subscription
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-g-model-1
+    lineage: {family: family-g, vendor: vendor-g}
+    tier: substitute
+    rank: 4
+    status: trial
+    quorum_eligible: false  # trial rows are draw-excluded and never count toward quorum
+    recheck_after: 2026-09-15
+    cost_class: cheap-api
+    escalation_only: false
+    data_handling: standard
+    date: 2026-08-15
+  - id: vendor-h-model-1
+    lineage: {family: family-h, vendor: vendor-h}
+    tier: substitute
+    rank: 5
+    status: trial
+    quorum_eligible: false
+    recheck_after: 2026-09-15
+    cost_class: cheap-api
+    escalation_only: false
+    data_handling: training-contributor  # sample contributor tier may train on data; sensitive work must use a standard tier
+    date: 2026-08-15

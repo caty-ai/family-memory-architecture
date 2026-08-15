@@ -18,6 +18,7 @@ from pathlib import Path
 
 import test_content_lint
 import test_injection_lint
+import test_model_catalog
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1352,6 +1353,7 @@ if __name__ == "__main__":
             unittest.defaultTestLoader.loadTestsFromModule(test_jobs_framework),
             unittest.defaultTestLoader.loadTestsFromModule(test_lib_atomic),
             unittest.defaultTestLoader.loadTestsFromModule(test_meili_ingest),
+            unittest.defaultTestLoader.loadTestsFromModule(test_model_catalog),
             unittest.defaultTestLoader.loadTestsFromModule(test_openclaw_capture),
             unittest.defaultTestLoader.loadTestsFromModule(test_recall),
             unittest.defaultTestLoader.loadTestsFromModule(test_secret_scan),

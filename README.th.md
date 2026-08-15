@@ -267,7 +267,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | การใช้การค้นหาข้ามชั้น `recall` | [docs/recall-usage.md](docs/recall-usage.md) |
 | กติกาการนำเข้าสู่ดัชนีค้นหา | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | ความหมายของการเฝ้าดูความล้มเหลว | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| โครงสร้างทั้งรีโปและหน้าที่ของสคริปต์ทั้ง 25 ตัว | [docs/repository-map.md](docs/repository-map.md) |
+| โครงสร้างทั้งรีโปและหน้าที่ของสคริปต์ทั้ง 26 ตัว | [docs/repository-map.md](docs/repository-map.md) |
 | อยากร่วมพัฒนา | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | พบบั๊กหรือช่องโหว่ | [SECURITY.md](SECURITY.md) |
 | กติกาการจัดสรรความทรงจำบนคลาวด์ | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
