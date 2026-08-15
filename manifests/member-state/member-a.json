@@ -1,0 +1,8 @@
+{
+  "member": "member-a",
+  "catalog_digest_adopted": "29180da8645b642ad807bf7ac1d63e828176ced38a5856af4065f807dda50588",
+  "config_digest": "eee38e540ee5d539406bd48bce9a1a42596a346234f15e5d93d8fb7cc56e1495",
+  "verified_at": "2026-08-15",
+  "spec_version": "moa-v2.1",
+  "vectors_version": "v1"
+}

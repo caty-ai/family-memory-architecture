@@ -1,0 +1,865 @@
+#!/usr/bin/env python3
+"""Fail-closed validation for the family model catalog and member adoption state."""
+
+from __future__ import annotations
+
+import argparse
+import codecs
+import datetime as dt
+import hashlib
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+
+FORBIDDEN_ROW_KEYS = {
+    "availability",
+    "liveness",
+    "quota",
+    "verified_at",
+    "writer_conflict",
+}
+TOP_LEVEL_KEYS = {
+    "revision",
+    "date",
+    "revision_effective_after",
+    "changelog",
+    "blast_radius",
+    "models",
+}
+TOP_LEVEL_REQUIRED = TOP_LEVEL_KEYS
+ROW_KEYS = {
+    "id",
+    "lineage",
+    "tier",
+    "rank",
+    "status",
+    "quorum_eligible",
+    "recheck_after",
+    "cost_class",
+    "escalation_only",
+    "data_handling",
+    "date",
+}
+ROW_REQUIRED = ROW_KEYS - {"recheck_after"}
+LINEAGE_KEYS = {"family", "vendor"}
+MEMBER_KEYS = {
+    "member",
+    "catalog_digest_adopted",
+    "config_digest",
+    "verified_at",
+    "spec_version",
+    "vectors_version",
+}
+HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+POLICY_SENTENCE = (
+    "カタログは法が禁じる席を合法化できず、メンバーが生存確認できないモデルを使用可能にできない。"
+    "eligibility はメンバー設定が勝ち、席数と制約はハンドブックが勝つ。"
+)
+POLICY_HEADINGS = (
+    "## 非規範宣言（handbook L1-10 と同文・逐語）",
+    "## 枠と選出",
+    "## 使用時 stamp（fail-closed）",
+    "## merge 権限（オーナー専決 + CI ゲート + front door + fast path）",
+    "## public-snapshot 除外",
+    "## LC-1（退場トリガー）",
+)
+
+
+class CatalogError(Exception):
+    """An input could not be safely read or parsed."""
+
+
+class DuplicateKeyError(ValueError):
+    """A JSON or YAML mapping contains a duplicate key."""
+
+
+def expected_catalog_schema() -> dict:
+    """Return the exact published schema contract the dependency-free gate enforces."""
+    nonempty = {"type": "string", "minLength": 1}
+    date_schema = {
+        "type": "string",
+        "format": "date",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+    }
+    row_properties = {
+        "id": {"$ref": "#/definitions/nonEmptyString"},
+        "lineage": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["family", "vendor"],
+            "properties": {
+                "family": {"$ref": "#/definitions/nonEmptyString"},
+                "vendor": {"$ref": "#/definitions/nonEmptyString"},
+            },
+        },
+        "tier": {"enum": ["priority", "substitute"]},
+        "rank": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["current", "trial", "retired"]},
+        "quorum_eligible": {"type": "boolean"},
+        "recheck_after": dict(date_schema),
+        "cost_class": {"enum": ["subscription", "cheap-api", "expensive"]},
+        "escalation_only": {"type": "boolean"},
+        "data_handling": {"enum": ["standard", "training-contributor"]},
+        "date": dict(date_schema),
+    }
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$id": "https://github.com/caty-ai/family-memory-architecture/manifests/model-catalog.schema.json",
+        "title": "Family model catalog",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "revision",
+            "date",
+            "revision_effective_after",
+            "changelog",
+            "blast_radius",
+            "models",
+        ],
+        "properties": {
+            "revision": {"type": "integer", "minimum": 1},
+            "date": dict(date_schema),
+            "revision_effective_after": dict(date_schema),
+            "changelog": dict(nonempty),
+            "blast_radius": dict(nonempty),
+            "models": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/definitions/model"},
+            },
+        },
+        "definitions": {
+            "nonEmptyString": dict(nonempty),
+            "model": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "lineage",
+                    "tier",
+                    "rank",
+                    "status",
+                    "quorum_eligible",
+                    "cost_class",
+                    "escalation_only",
+                    "data_handling",
+                    "date",
+                ],
+                "properties": row_properties,
+                "allOf": [
+                    {
+                        "if": {"properties": {"status": {"const": "trial"}}, "required": ["status"]},
+                        "then": {
+                            "required": ["recheck_after"],
+                            "properties": {"quorum_eligible": {"const": False}},
+                        },
+                    },
+                    {
+                        "if": {"properties": {"status": {"const": "retired"}}, "required": ["status"]},
+                        "then": {"properties": {"quorum_eligible": {"const": False}}},
+                    },
+                ],
+            },
+        },
+    }
+
+
+def expected_member_schema() -> dict:
+    date_schema = {
+        "type": "string",
+        "format": "date",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+    }
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$id": "https://github.com/caty-ai/family-memory-architecture/manifests/member-state/schema.json",
+        "title": "Model catalog member adoption state",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "member",
+            "catalog_digest_adopted",
+            "config_digest",
+            "verified_at",
+            "spec_version",
+            "vectors_version",
+        ],
+        "properties": {
+            "member": {"type": "string", "minLength": 1},
+            "catalog_digest_adopted": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "config_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "verified_at": date_schema,
+            "spec_version": {"type": "string", "minLength": 1},
+            "vectors_version": {"type": "string", "minLength": 1},
+        },
+    }
+
+
+def first_contract_difference(expected, actual, path="$schema") -> str | None:
+    if type(expected) is not type(actual):
+        return f"{path}: expected {type(expected).__name__}, got {type(actual).__name__}"
+    if isinstance(expected, dict):
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        if missing:
+            return f"{path}: missing key {missing[0]!r}"
+        if extra:
+            return f"{path}: unexpected key {extra[0]!r}"
+        for key in expected:
+            difference = first_contract_difference(expected[key], actual[key], f"{path}.{key}")
+            if difference:
+                return difference
+        return None
+    if isinstance(expected, list):
+        if len(expected) != len(actual):
+            return f"{path}: expected {len(expected)} items, got {len(actual)}"
+        for index, item in enumerate(expected):
+            difference = first_contract_difference(item, actual[index], f"{path}[{index}]")
+            if difference:
+                return difference
+        return None
+    if expected != actual:
+        return f"{path}: expected {expected!r}, got {actual!r}"
+    return None
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    root = repo_root()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--catalog", type=Path, default=root / "manifests" / "model-catalog.yaml")
+    parser.add_argument("--schema", type=Path, default=root / "manifests" / "model-catalog.schema.json")
+    parser.add_argument("--policy", type=Path, default=root / "policies" / "model-catalog.md")
+    parser.add_argument("--member-state-dir", type=Path, default=root / "manifests" / "member-state")
+    parser.add_argument(
+        "--member-schema",
+        type=Path,
+        default=root / "manifests" / "member-state" / "schema.json",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="compare the catalog against a previously published catalog",
+    )
+    parser.add_argument("--digest", action="store_true", help="print the validated catalog SHA-256 only")
+    return parser.parse_args(argv)
+
+
+def read_utf8_bytes(path: Path, label: str) -> tuple[bytes, str]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise CatalogError(f"cannot read {label} {path}: {exc}") from exc
+    if raw.startswith(codecs.BOM_UTF8):
+        raise CatalogError(f"{label} {path}: UTF-8 BOM is not canonical")
+    try:
+        return raw, raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CatalogError(f"{label} {path}: invalid UTF-8: {exc}") from exc
+
+
+def reject_duplicate_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateKeyError(f"duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def read_json_object(path: Path, label: str) -> dict:
+    _, text = read_utf8_bytes(path, label)
+    try:
+        value = json.loads(text, object_pairs_hook=reject_duplicate_pairs)
+    except (json.JSONDecodeError, DuplicateKeyError) as exc:
+        raise CatalogError(f"cannot parse {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise CatalogError(f"{label} {path}: expected a JSON object")
+    return value
+
+
+def strip_yaml_comment(line: str) -> str:
+    single = False
+    double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if double and char == "\\":
+            escaped = True
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif char == "#" and not single and not double and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    if single or double:
+        raise CatalogError("unterminated quoted scalar")
+    return line.rstrip()
+
+
+def split_flow_items(body: str, line_number: int) -> list[str]:
+    items = []
+    current = []
+    single = False
+    double = False
+    escaped = False
+    depth = 0
+    for char in body:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if double and char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif not single and not double:
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth -= 1
+                if depth < 0:
+                    raise CatalogError(f"line {line_number}: malformed flow value")
+            elif char == "," and depth == 0:
+                items.append("".join(current).strip())
+                current = []
+                continue
+        current.append(char)
+    if single or double or depth:
+        raise CatalogError(f"line {line_number}: malformed flow value")
+    items.append("".join(current).strip())
+    return items
+
+
+def split_key_value(text: str, line_number: int) -> tuple[str, str]:
+    if ":" not in text:
+        raise CatalogError(f"line {line_number}: expected key: value")
+    key, value = text.split(":", 1)
+    key = key.strip()
+    if not KEY_RE.fullmatch(key):
+        raise CatalogError(f"line {line_number}: invalid key {key!r}")
+    return key, value.strip()
+
+
+def parse_scalar(value: str, line_number: int):
+    if value == "":
+        return None
+    if value in {"true", "false"}:
+        return value == "true"
+    if value in {"null", "~"}:
+        return None
+    if re.fullmatch(r"-?(0|[1-9][0-9]*)", value):
+        return int(value)
+    if value.startswith("{"):
+        if not value.endswith("}"):
+            raise CatalogError(f"line {line_number}: malformed flow mapping")
+        body = value[1:-1].strip()
+        result = {}
+        if not body:
+            return result
+        for item in split_flow_items(body, line_number):
+            key, item_value = split_key_value(item, line_number)
+            if key in result:
+                raise CatalogError(f"line {line_number}: duplicate key {key!r}")
+            result[key] = parse_scalar(item_value, line_number)
+        return result
+    if value.startswith("["):
+        if not value.endswith("]"):
+            raise CatalogError(f"line {line_number}: malformed flow sequence")
+        body = value[1:-1].strip()
+        return [] if not body else [parse_scalar(item, line_number) for item in split_flow_items(body, line_number)]
+    if value[0] in {"'", '"'}:
+        if len(value) < 2 or value[-1] != value[0]:
+            raise CatalogError(f"line {line_number}: unterminated quoted scalar")
+        if value[0] == "'" and ("\\" in value[1:-1] or "''" in value[1:-1]):
+            raise CatalogError(f"line {line_number}: unsupported quoting in single-quoted scalar")
+        try:
+            if value[0] == '"':
+                parsed = json.loads(value)
+            else:
+                parsed = value[1:-1]
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise CatalogError(f"line {line_number}: invalid quoted scalar: {exc}") from exc
+        if not isinstance(parsed, str):
+            raise CatalogError(f"line {line_number}: quoted scalar must be a string")
+        if any(unicodedata.category(char) == "Cc" for char in parsed):
+            raise CatalogError(f"line {line_number}: decoded control character in quoted scalar")
+        return parsed
+    if value.startswith(("&", "*", "!")):
+        raise CatalogError(f"line {line_number}: YAML anchors, aliases, and tags are unsupported")
+    return value
+
+
+def put_unique(mapping: dict, key: str, value, line_number: int) -> None:
+    if key in mapping:
+        raise CatalogError(f"line {line_number}: duplicate key {key!r}")
+    mapping[key] = value
+
+
+def parse_yaml_subset(text: str) -> dict:
+    """Parse the deliberately small catalog YAML grammar using stdlib only."""
+    lines = text.splitlines()
+    data = {}
+    models = None
+    current_row = None
+    nested_mapping = None
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        line_number = index + 1
+        if "\t" in raw:
+            raise CatalogError(f"line {line_number}: tabs are not allowed")
+        try:
+            line = strip_yaml_comment(raw)
+        except CatalogError as exc:
+            raise CatalogError(f"line {line_number}: {exc}") from exc
+        if not line.strip():
+            index += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line[indent:]
+        if indent == 0:
+            current_row = None
+            nested_mapping = None
+            key, value = split_key_value(stripped, line_number)
+            if key == "models":
+                if value:
+                    raise CatalogError(f"line {line_number}: models must be a block sequence")
+                models = []
+                put_unique(data, key, models, line_number)
+                index += 1
+                continue
+            if value in {">", "|-", "|", ">-"}:
+                block = []
+                index += 1
+                while index < len(lines):
+                    block_raw = lines[index]
+                    if "\t" in block_raw:
+                        raise CatalogError(f"line {index + 1}: tabs are not allowed")
+                    if block_raw.strip() and len(block_raw) - len(block_raw.lstrip(" ")) == 0:
+                        break
+                    block.append(block_raw[2:] if block_raw.startswith("  ") else block_raw.lstrip(" "))
+                    index += 1
+                if value.startswith(">"):
+                    paragraphs = []
+                    current = []
+                    for part in block:
+                        if part.strip():
+                            current.append(part.strip())
+                        elif current:
+                            paragraphs.append(" ".join(current))
+                            current = []
+                    if current:
+                        paragraphs.append(" ".join(current))
+                    scalar = "\n".join(paragraphs)
+                else:
+                    scalar = "\n".join(block)
+                put_unique(data, key, scalar, line_number)
+                continue
+            put_unique(data, key, parse_scalar(value, line_number), line_number)
+            index += 1
+            continue
+        if models is None:
+            raise CatalogError(f"line {line_number}: unexpected indentation")
+        if indent == 2 and stripped.startswith("- "):
+            current_row = {}
+            models.append(current_row)
+            nested_mapping = None
+            key, value = split_key_value(stripped[2:], line_number)
+            put_unique(current_row, key, parse_scalar(value, line_number), line_number)
+            index += 1
+            continue
+        if indent == 4 and current_row is not None:
+            key, value = split_key_value(stripped, line_number)
+            parsed = parse_scalar(value, line_number)
+            if value == "":
+                parsed = {}
+                nested_mapping = parsed
+            else:
+                nested_mapping = None
+            put_unique(current_row, key, parsed, line_number)
+            index += 1
+            continue
+        if indent == 6 and current_row is not None and nested_mapping is not None:
+            key, value = split_key_value(stripped, line_number)
+            put_unique(nested_mapping, key, parse_scalar(value, line_number), line_number)
+            index += 1
+            continue
+        raise CatalogError(f"line {line_number}: unsupported catalog YAML shape")
+    if not isinstance(data, dict):
+        raise CatalogError("catalog must be a mapping")
+    return data
+
+
+def parse_yaml(text: str) -> dict:
+    # The repository does not declare PyYAML as a dependency. A constrained
+    # parser keeps local and stock-CI behavior identical and rejects YAML
+    # features (aliases/tags/arbitrary nesting) outside the catalog grammar.
+    value = parse_yaml_subset(text)
+    if not isinstance(value, dict):
+        raise CatalogError("catalog YAML must contain a top-level mapping")
+    return value
+
+
+def add_error(errors: list[str], path: str, message: str) -> None:
+    errors.append(f"schema {path}: {message}")
+
+
+def require_nonempty_string(errors: list[str], path: str, value) -> None:
+    if not isinstance(value, str) or not value.strip():
+        add_error(errors, path, "must be a non-empty string")
+
+
+def parse_date(errors: list[str], path: str, value) -> dt.date | None:
+    if not isinstance(value, str):
+        add_error(errors, path, "must be an ISO date string")
+        return None
+    try:
+        parsed = dt.date.fromisoformat(value)
+    except ValueError:
+        add_error(errors, path, "must be a valid ISO date (YYYY-MM-DD)")
+        return None
+    if parsed.isoformat() != value:
+        add_error(errors, path, "must use canonical YYYY-MM-DD form")
+        return None
+    return parsed
+
+
+def validate_catalog_schema(catalog: dict) -> list[str]:
+    errors = []
+    missing = sorted(TOP_LEVEL_REQUIRED - set(catalog))
+    for key in missing:
+        add_error(errors, "$", f"missing required property {key!r}")
+    for key in sorted(set(catalog) - TOP_LEVEL_KEYS):
+        add_error(errors, "$", f"additional property {key!r} is not allowed")
+
+    revision = catalog.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        add_error(errors, "$.revision", "must be an integer >= 1")
+    catalog_date = parse_date(errors, "$.date", catalog.get("date")) if "date" in catalog else None
+    effective = (
+        parse_date(errors, "$.revision_effective_after", catalog.get("revision_effective_after"))
+        if "revision_effective_after" in catalog
+        else None
+    )
+    if catalog_date is not None and effective is not None and effective < catalog_date:
+        errors.append("revision integrity: revision_effective_after must be on or after date")
+    for key in ("changelog", "blast_radius"):
+        if key in catalog:
+            require_nonempty_string(errors, f"$.{key}", catalog[key])
+
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        add_error(errors, "$.models", "must be an array")
+        return errors
+    if not models:
+        add_error(errors, "$.models", "must contain at least one row")
+    for index, row in enumerate(models):
+        path = f"$.models[{index}]"
+        if not isinstance(row, dict):
+            add_error(errors, path, "must be an object")
+            continue
+        for key in sorted(ROW_REQUIRED - set(row)):
+            add_error(errors, path, f"missing required property {key!r}")
+        for key in sorted(set(row) - ROW_KEYS):
+            add_error(errors, path, f"additional property {key!r} is not allowed")
+        if "id" in row:
+            require_nonempty_string(errors, f"{path}.id", row["id"])
+        lineage = row.get("lineage")
+        if not isinstance(lineage, dict):
+            add_error(errors, f"{path}.lineage", "must be an object")
+        else:
+            for key in sorted(LINEAGE_KEYS - set(lineage)):
+                add_error(errors, f"{path}.lineage", f"missing required property {key!r}")
+            for key in sorted(set(lineage) - LINEAGE_KEYS):
+                add_error(errors, f"{path}.lineage", f"additional property {key!r} is not allowed")
+            for key in LINEAGE_KEYS & set(lineage):
+                require_nonempty_string(errors, f"{path}.lineage.{key}", lineage[key])
+        if row.get("tier") not in {"priority", "substitute"}:
+            add_error(errors, f"{path}.tier", "must be priority or substitute")
+        rank = row.get("rank")
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+            add_error(errors, f"{path}.rank", "must be an integer >= 1")
+        if row.get("status") not in {"current", "trial", "retired"}:
+            add_error(errors, f"{path}.status", "must be current, trial, or retired")
+        for key in ("quorum_eligible", "escalation_only"):
+            if not isinstance(row.get(key), bool):
+                add_error(errors, f"{path}.{key}", "must be a boolean")
+        if row.get("cost_class") not in {"subscription", "cheap-api", "expensive"}:
+            add_error(errors, f"{path}.cost_class", "has an unsupported value")
+        if row.get("data_handling") not in {"standard", "training-contributor"}:
+            add_error(errors, f"{path}.data_handling", "has an unsupported value")
+        if "date" in row:
+            parse_date(errors, f"{path}.date", row["date"])
+        if "recheck_after" in row:
+            parse_date(errors, f"{path}.recheck_after", row["recheck_after"])
+        if row.get("status") == "trial":
+            if "recheck_after" not in row:
+                errors.append(f"trial rule {path}: recheck_after is required")
+            if row.get("quorum_eligible") is not False:
+                errors.append(f"trial rule {path}: quorum_eligible must be false")
+        if row.get("status") == "retired" and row.get("quorum_eligible") is not False:
+            errors.append(f"retired rule {path}: quorum_eligible must be false")
+    return errors
+
+
+def walk_forbidden(value, path: str, errors: list[str]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}"
+            if key in FORBIDDEN_ROW_KEYS:
+                errors.append(f"G2 {child}: forbidden availability-shaped key {key!r}")
+            walk_forbidden(item, child, errors)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            walk_forbidden(item, f"{path}[{index}]", errors)
+
+
+def validate_semantics(catalog: dict) -> list[str]:
+    errors = []
+    walk_forbidden(catalog, "$", errors)
+    models = catalog.get("models")
+    if not isinstance(models, list):
+        return errors
+    seen = {}
+    seen_tier_ranks = {}
+    drawable_rows = 0
+    for index, row in enumerate(models):
+        if not isinstance(row, dict):
+            continue
+        path = f"$.models[{index}]"
+        lineage = row.get("lineage")
+        if not isinstance(lineage, dict):
+            errors.append(f"lineage {path}: family and vendor must both be non-empty")
+        else:
+            for field in ("family", "vendor"):
+                value = lineage.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"lineage {path}.{field}: must be non-empty")
+        model_id = row.get("id")
+        if isinstance(model_id, str):
+            if model_id in seen:
+                errors.append(f"duplicate id {model_id!r}: rows {seen[model_id]} and {index}")
+            else:
+                seen[model_id] = index
+        tier_rank = (row.get("tier"), row.get("rank"))
+        if tier_rank in seen_tier_ranks:
+            errors.append(
+                f"duplicate tier-rank {tier_rank!r}: rows {seen_tier_ranks[tier_rank]} and {index}"
+            )
+        else:
+            seen_tier_ranks[tier_rank] = index
+        if (
+            row.get("tier") == "priority"
+            and row.get("status") == "current"
+            and row.get("quorum_eligible") is True
+        ):
+            drawable_rows += 1
+    if drawable_rows == 0:
+        errors.append("drawability: at least one current priority quorum-eligible row is required")
+    return errors
+
+
+def validate_policy(path: Path) -> list[str]:
+    try:
+        _, text = read_utf8_bytes(path, "policy")
+    except CatalogError as exc:
+        return [str(exc)]
+    errors = []
+    lines = set(text.splitlines())
+    for heading in POLICY_HEADINGS:
+        if heading not in lines:
+            errors.append(f"policy: required section {heading!r} is absent")
+    if POLICY_SENTENCE not in text:
+        errors.append("policy: exact non-normative precedence sentence is absent")
+    for marker in ("**G1**", "**G2**"):
+        if marker not in text:
+            errors.append(f"policy: required marker {marker!r} is absent")
+    return errors
+
+
+def validate_member_state(
+    state: dict,
+    path: Path,
+    catalog_digest: str,
+    revision_effective_after: dt.date | None,
+    today: dt.date,
+) -> tuple[list[str], list[str]]:
+    errors = []
+    notices = []
+    label = f"member-state {path.name}"
+    for key in sorted(MEMBER_KEYS - set(state)):
+        errors.append(f"{label}: missing required property {key!r}")
+    for key in sorted(set(state) - MEMBER_KEYS):
+        errors.append(f"{label}: additional property {key!r} is not allowed")
+    for key in ("member", "spec_version", "vectors_version"):
+        value = state.get(key)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{label}.{key}: must be a non-empty string")
+    for key in ("catalog_digest_adopted", "config_digest"):
+        value = state.get(key)
+        if not isinstance(value, str) or not HEX_DIGEST_RE.fullmatch(value):
+            errors.append(f"{label}.{key}: must be a lowercase SHA-256 digest")
+    date_errors = []
+    if "verified_at" in state:
+        parse_date(date_errors, f"{label}.verified_at", state["verified_at"])
+        errors.extend(date_errors)
+    adopted = state.get("catalog_digest_adopted")
+    if isinstance(adopted, str) and HEX_DIGEST_RE.fullmatch(adopted) and adopted != catalog_digest:
+        member = state.get("member")
+        member_name = member if isinstance(member, str) and member.strip() else path.stem
+        if revision_effective_after is not None and today <= revision_effective_after:
+            notices.append(
+                f"NOTICE: {member_name} lags current digest "
+                f"(within adoption window until {revision_effective_after.isoformat()})"
+            )
+        else:
+            errors.append(
+                f"{label}.catalog_digest_adopted: {adopted} does not match existing catalog digest "
+                f"{catalog_digest} after the adoption window"
+            )
+    return errors, notices
+
+
+def validate_member_states(
+    directory: Path,
+    schema_path: Path,
+    catalog_digest: str,
+    revision_effective_after: dt.date | None,
+    today: dt.date,
+) -> tuple[list[str], list[str]]:
+    errors = []
+    notices = []
+    try:
+        schema = read_json_object(schema_path, "member-state schema")
+    except CatalogError as exc:
+        return [str(exc)], notices
+    difference = first_contract_difference(expected_member_schema(), schema)
+    if difference:
+        errors.append(f"member-state schema contract drift: {difference}")
+    if not directory.is_dir():
+        return errors + [f"member-state directory {directory}: missing or not a directory"], notices
+    paths = sorted(path for path in directory.glob("*.json") if path.resolve() != schema_path.resolve())
+    if not paths:
+        errors.append(f"member-state directory {directory}: no state records found")
+        return errors, notices
+    for path in paths:
+        try:
+            state = read_json_object(path, "member-state record")
+        except CatalogError as exc:
+            errors.append(str(exc))
+            continue
+        state_errors, state_notices = validate_member_state(
+            state,
+            path,
+            catalog_digest,
+            revision_effective_after,
+            today,
+        )
+        errors.extend(state_errors)
+        notices.extend(state_notices)
+    return errors, notices
+
+
+def validate_schema_file(path: Path) -> list[str]:
+    try:
+        schema = read_json_object(path, "catalog schema")
+    except CatalogError as exc:
+        return [str(exc)]
+    difference = first_contract_difference(expected_catalog_schema(), schema)
+    return [f"catalog schema contract drift: {difference}"] if difference else []
+
+
+def validate_baseline(path: Path, current_raw: bytes, current_catalog: dict) -> list[str]:
+    try:
+        baseline_raw, baseline_text = read_utf8_bytes(path, "baseline catalog")
+        baseline = parse_yaml(baseline_text)
+    except CatalogError as exc:
+        return [str(exc)]
+    baseline_errors = validate_catalog_schema(baseline) + validate_semantics(baseline)
+    if baseline_errors:
+        return [f"baseline catalog is invalid: {error}" for error in baseline_errors]
+    if baseline_raw == current_raw:
+        return []
+
+    errors = []
+    current_revision = current_catalog.get("revision")
+    baseline_revision = baseline.get("revision")
+    if (
+        isinstance(current_revision, bool)
+        or not isinstance(current_revision, int)
+        or isinstance(baseline_revision, bool)
+        or not isinstance(baseline_revision, int)
+        or current_revision <= baseline_revision
+    ):
+        errors.append("baseline integrity: changed catalog bytes require a revision increase")
+    if current_catalog.get("changelog") == baseline.get("changelog"):
+        errors.append("baseline integrity: changed catalog bytes require a changed changelog")
+    return errors
+
+
+def run(args: argparse.Namespace) -> tuple[list[str], str | None, list[str]]:
+    errors = []
+    notices = []
+    try:
+        raw, text = read_utf8_bytes(args.catalog, "catalog")
+        catalog = parse_yaml(text)
+    except CatalogError as exc:
+        return [str(exc)], None, notices
+    digest = hashlib.sha256(raw).hexdigest()
+    errors.extend(validate_schema_file(args.schema))
+    errors.extend(validate_catalog_schema(catalog))
+    errors.extend(validate_semantics(catalog))
+    errors.extend(validate_policy(args.policy))
+    effective_errors = []
+    effective = parse_date(effective_errors, "$.revision_effective_after", catalog.get("revision_effective_after"))
+    member_errors, member_notices = validate_member_states(
+        args.member_state_dir,
+        args.member_schema,
+        digest,
+        effective,
+        dt.date.today(),
+    )
+    errors.extend(member_errors)
+    notices.extend(member_notices)
+    if args.baseline is not None:
+        errors.extend(validate_baseline(args.baseline, raw, catalog))
+    return errors, digest, notices
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        errors, digest, notices = run(args)
+    except Exception as exc:  # Last-resort fail-closed boundary for malformed input.
+        print(f"ERROR: unexpected validation failure ({type(exc).__name__}): {exc}", file=sys.stderr)
+        return 1
+    for notice in notices:
+        print(notice, file=sys.stderr)
+    if errors:
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    if args.digest:
+        print(digest)
+    else:
+        print("OK: model catalog, G2 policy, and member-state records are valid")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
