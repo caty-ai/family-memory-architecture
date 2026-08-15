@@ -49,6 +49,7 @@ MEMBER_KEYS = {
     "member",
     "catalog_digest_adopted",
     "config_digest",
+    "referenced_ids",
     "verified_at",
     "spec_version",
     "vectors_version",
@@ -169,6 +170,7 @@ def expected_catalog_schema() -> dict:
 
 
 def expected_member_schema() -> dict:
+    referenced_id_schema = dict(expected_catalog_schema()["definitions"]["nonEmptyString"])
     date_schema = {
         "type": "string",
         "format": "date",
@@ -184,6 +186,7 @@ def expected_member_schema() -> dict:
             "member",
             "catalog_digest_adopted",
             "config_digest",
+            "referenced_ids",
             "verified_at",
             "spec_version",
             "vectors_version",
@@ -192,6 +195,12 @@ def expected_member_schema() -> dict:
             "member": {"type": "string", "minLength": 1},
             "catalog_digest_adopted": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "config_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "referenced_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": referenced_id_schema,
+            },
             "verified_at": date_schema,
             "spec_version": {"type": "string", "minLength": 1},
             "vectors_version": {"type": "string", "minLength": 1},
@@ -692,10 +701,33 @@ def validate_policy(path: Path) -> list[str]:
     return errors
 
 
+def catalog_id_statuses(catalog: dict) -> dict[str, str] | None:
+    """Return a validated ID-to-status map sourced only from catalog model rows."""
+    models = catalog.get("models")
+    if not isinstance(models, list) or not models:
+        return None
+    result = {}
+    for row in models:
+        if not isinstance(row, dict):
+            return None
+        model_id = row.get("id")
+        status = row.get("status")
+        if (
+            not isinstance(model_id, str)
+            or not model_id.strip()
+            or status not in {"current", "trial", "retired"}
+            or model_id in result
+        ):
+            return None
+        result[model_id] = status
+    return result
+
+
 def validate_member_state(
     state: dict,
     path: Path,
     catalog_digest: str,
+    catalog_models: dict[str, str],
     revision_effective_after: dt.date | None,
     today: dt.date,
 ) -> tuple[list[str], list[str]]:
@@ -714,14 +746,59 @@ def validate_member_state(
         value = state.get(key)
         if not isinstance(value, str) or not HEX_DIGEST_RE.fullmatch(value):
             errors.append(f"{label}.{key}: must be a lowercase SHA-256 digest")
+    member = state.get("member")
+    member_name = member if isinstance(member, str) and member.strip() else path.stem
+    referenced_ids = state.get("referenced_ids")
+    if not isinstance(referenced_ids, list):
+        errors.append(f"{label}.referenced_ids for member {member_name!r}: must be an array")
+    else:
+        if not referenced_ids:
+            errors.append(
+                f"{label}.referenced_ids for member {member_name!r}: "
+                "must contain at least one model id"
+            )
+        seen_referenced_ids = set()
+        all_strings = True
+        for index, model_id in enumerate(referenced_ids):
+            if not isinstance(model_id, str):
+                all_strings = False
+                errors.append(
+                    f"{label}.referenced_ids[{index}] for member {member_name!r}: "
+                    "must be a non-empty string"
+                )
+                continue
+            if not model_id.strip():
+                errors.append(
+                    f"{label}.referenced_ids[{index}] for member {member_name!r}: "
+                    "must be a non-empty string"
+                )
+            if model_id in seen_referenced_ids:
+                errors.append(
+                    f"{label}.referenced_ids for member {member_name!r}: "
+                    f"duplicate model id {model_id!r} is not allowed"
+                )
+            else:
+                seen_referenced_ids.add(model_id)
+            if model_id not in catalog_models:
+                errors.append(
+                    f"{label}: member {member_name!r} references model id {model_id!r} "
+                    "that is absent from the catalog"
+                )
+            elif catalog_models[model_id] == "retired":
+                notices.append(
+                    f"NOTICE: member {member_name!r} references retired model id {model_id!r}"
+                )
+        if all_strings and referenced_ids != sorted(referenced_ids):
+            errors.append(
+                f"{label}.referenced_ids for member {member_name!r}: must be sorted ascending; "
+                "regenerate it from the member's local seat-configuration file"
+            )
     date_errors = []
     if "verified_at" in state:
         parse_date(date_errors, f"{label}.verified_at", state["verified_at"])
         errors.extend(date_errors)
     adopted = state.get("catalog_digest_adopted")
     if isinstance(adopted, str) and HEX_DIGEST_RE.fullmatch(adopted) and adopted != catalog_digest:
-        member = state.get("member")
-        member_name = member if isinstance(member, str) and member.strip() else path.stem
         if revision_effective_after is not None and today <= revision_effective_after:
             notices.append(
                 f"NOTICE: {member_name} lags current digest "
@@ -739,6 +816,7 @@ def validate_member_states(
     directory: Path,
     schema_path: Path,
     catalog_digest: str,
+    catalog_models: dict[str, str] | None,
     revision_effective_after: dt.date | None,
     today: dt.date,
 ) -> tuple[list[str], list[str]]:
@@ -751,6 +829,12 @@ def validate_member_states(
     difference = first_contract_difference(expected_member_schema(), schema)
     if difference:
         errors.append(f"member-state schema contract drift: {difference}")
+    if not isinstance(catalog_models, dict) or not catalog_models:
+        errors.append(
+            "catalog reference set: cannot validate member referenced_ids against "
+            "an empty or invalid catalog model id set"
+        )
+        return errors, notices
     if not directory.is_dir():
         return errors + [f"member-state directory {directory}: missing or not a directory"], notices
     paths = sorted(path for path in directory.glob("*.json") if path.resolve() != schema_path.resolve())
@@ -767,6 +851,7 @@ def validate_member_states(
             state,
             path,
             catalog_digest,
+            catalog_models,
             revision_effective_after,
             today,
         )
@@ -831,6 +916,7 @@ def run(args: argparse.Namespace) -> tuple[list[str], str | None, list[str]]:
         args.member_state_dir,
         args.member_schema,
         digest,
+        catalog_id_statuses(catalog),
         effective,
         dt.date.today(),
     )

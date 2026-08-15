@@ -23,8 +23,9 @@
 ## 使用時 stamp（fail-closed）
 
 - 席決定時、メンバーのセレクタは自分の採用 `catalog_digest` を照合し、**現行改訂の `revision_effective_after` を超えて古い場合は fail-closed**（席決定を拒否）。
-- 完了は公開された状態から導出する: ①`manifests/member-state/` の state record（member / catalog_digest_adopted / config_digest / verified_at / spec・vectors versions）②実席決定に stamp された catalog_digest。誰も「done」と手で書かない。**ack は advisory** — 本リポの CI は、旧 digest の state record を `revision_effective_after` 以内なら**通知つきで通し**（採用遅れは設計上の正常状態）、期限超過のみ error にする（執行の本丸はメンバー側セレクタの使用時 fail-closed）。
+- 完了は公開された状態から導出する: ①`manifests/member-state/` の state record（member / catalog_digest_adopted / config_digest / referenced_ids / verified_at / spec・vectors versions）②実席決定に stamp された catalog_digest。誰も「done」と手で書かない。**ack は advisory** — 本リポの CI は、旧 digest の state record を `revision_effective_after` 以内なら**通知つきで通し**（採用遅れは設計上の正常状態）、期限超過のみ error にする（執行の本丸はメンバー側セレクタの使用時 fail-closed）。
 - `config_digest` の定義= **そのメンバーのローカル席設定ファイルの生バイト sha256**。第三者はメンバーが公開した設定と突合して検証できる。
+- `referenced_ids` の定義= **そのメンバーのローカル席設定ファイル（生バイトが `config_digest` になる同じファイル）が参照する model id の集合**。同ファイルが変わるたびに機械的に再生成する。`config_digest` と `referenced_ids` の整合は構造上保証されず運用規律だけで保たれるため、必ず同時に更新する。
 - 公開サンプル `member-a` の `config_digest` は `printf 'member-a-sample-config' | shasum -a 256` で導出する。
 - 決定記録の catalog_digest が `revision_effective_after` を超えて古い場合は「遅延」でなく**非適合**として報告（報告主体は checker・P1 では上記 fail-closed が先に止める）。
 
@@ -32,8 +33,8 @@
 
 - **merge は各 family のオーナー専決**（tier 構成・順序・status はコスト/能力/好みの判断= R-3 オーナー専決領域）。
 - **family PR front door**: 提案は誰でも PR で出せる（merge はオーナーのみ）。
-- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / public-snapshot 除外節（本 policy の当該見出し）の存在検査。除外**ファイル**自体の存在検査は配布ゲート側の責務（下記 §public-snapshot 除外）。
-- **理由つき N/A（ゲート一覧との差分・LC-1 つき）**: ①**未知 id / union check** — メンバー設定が参照する id 集合は共有データ面から見えないため P1 では検査不能。member-state に `referenced_ids` を足して実装する（各 family の private follow-up Issue・LC-1= 次のカタログ改訂 or 最初の追加メンバー採用）②**conformance vectors 通過** — vectors は法側で公開後に CI へ組み込む。
+- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / member-state `referenced_ids` の必須・非空・重複なし・昇順検査と catalog id への union check（retired id の参照は通すが NOTICE）/ public-snapshot 除外節（本 policy の当該見出し）の存在検査。除外**ファイル**自体の存在検査は配布ゲート側の責務（下記 §public-snapshot 除外）。
+- **理由つき N/A（ゲート一覧との差分・LC-1 つき）**: ①**conformance vectors 通過** — vectors は法側で公開後に CI へ組み込む。
 - **緊急降格 fast path**: 事由つき retire はオーナー directive+期限で即時（静かな reorder と区別）。retired 行は削除せず `status: retired` で残す（監査）。
 - 同意の実体は **per-member pinned adoption**（handbook v0.11.0）: merge は誰のホストの既定も変えない。メンバーが adopt するまで動かない。
 

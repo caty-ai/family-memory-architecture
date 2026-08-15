@@ -83,6 +83,12 @@ class ModelCatalogTests(unittest.TestCase):
         state["catalog_digest_adopted"] = hashlib.sha256(self.catalog.read_bytes()).hexdigest()
         self.member_a.write_text(json.dumps(state), encoding="utf-8")
 
+    def member_state(self):
+        return json.loads(self.member_a.read_text(encoding="utf-8"))
+
+    def write_member_state(self, state):
+        self.member_a.write_text(json.dumps(state), encoding="utf-8")
+
     def set_catalog_window(self, catalog_date, effective_date):
         text = re.sub(
             r"^date: [0-9]{4}-[0-9]{2}-[0-9]{2}$",
@@ -348,6 +354,16 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(module.ROW_REQUIRED, set(model_schema["required"]))
         self.assertEqual(module.LINEAGE_KEYS, set(model_schema["properties"]["lineage"]["properties"]))
 
+        expected_member = module.expected_member_schema()
+        actual_member = json.loads(self.member_schema.read_text(encoding="utf-8"))
+        self.assertEqual(actual_member, expected_member)
+        self.assertEqual(module.MEMBER_KEYS, set(expected_member["properties"]))
+        self.assertEqual(module.MEMBER_KEYS, set(expected_member["required"]))
+        self.assertEqual(
+            expected_member["properties"]["referenced_ids"]["items"],
+            expected["definitions"]["nonEmptyString"],
+        )
+
     def test_baseline_is_fail_closed_when_missing_or_invalid(self):
         missing = self.root / "missing.yaml"
         self.assert_fails_with("cannot read baseline catalog", self.run_check("--baseline", missing))
@@ -391,6 +407,96 @@ class ModelCatalogTests(unittest.TestCase):
         self.assert_fails_with("missing required property 'member'", result)
         self.assertIn("additional property 'availability' is not allowed", result.stderr)
         self.assertIn("must be a lowercase SHA-256 digest", result.stderr)
+
+    def test_member_state_missing_referenced_ids_fails(self):
+        state = self.member_state()
+        del state["referenced_ids"]
+        self.write_member_state(state)
+        self.assert_fails_with("missing required property 'referenced_ids'")
+
+    def test_member_state_referenced_ids_must_be_sorted(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-e-model-1", "vendor-a-model-1"]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("must be sorted ascending", result)
+        self.assertIn("regenerate it from the member's local seat-configuration file", result.stderr)
+
+    def test_member_state_referenced_ids_reject_duplicates(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-a-model-1", "vendor-a-model-1"]
+        self.write_member_state(state)
+        self.assert_fails_with("duplicate model id 'vendor-a-model-1' is not allowed")
+
+    def test_member_state_referenced_ids_reject_empty_list(self):
+        state = self.member_state()
+        state["referenced_ids"] = []
+        self.write_member_state(state)
+        self.assert_fails_with("must contain at least one model id")
+
+    def test_member_state_referenced_ids_must_be_a_list(self):
+        state = self.member_state()
+        state["referenced_ids"] = "vendor-a-model-1"
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids for member 'member-a': must be an array")
+
+    def test_member_state_referenced_ids_reject_non_string_element(self):
+        state = self.member_state()
+        state["referenced_ids"] = [7, "vendor-a-model-1"]
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+
+    def test_member_state_referenced_ids_reject_malformed_id(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["   "]
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+
+    def test_member_state_referenced_id_absent_from_catalog_fails_union(self):
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
+        self.assertIn("member-a", result.stderr)
+        self.assertIn(absent_id, result.stderr)
+
+    def test_member_union_uses_ids_from_live_catalog_models(self):
+        old_id = "vendor-a-model-1"
+        new_id = "vendor-a-model-renamed"
+        self.write_catalog(
+            self.catalog_text().replace(f"  - id: {old_id}", f"  - id: {new_id}", 1)
+        )
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
+        self.assertIn("member-a", result.stderr)
+        self.assertIn(old_id, result.stderr)
+
+    def test_empty_catalog_cannot_vacuously_pass_member_union(self):
+        text = self.catalog_text()
+        self.write_catalog(text[: text.index("  - id: ")])
+        result = self.run_check()
+        self.assert_fails_with("must contain at least one row", result)
+        self.assertIn("cannot validate member referenced_ids", result.stderr)
+        self.assertIn("empty or invalid catalog model id set", result.stderr)
+
+    def test_member_reference_to_retired_catalog_row_is_notice(self):
+        text = self.catalog_text()
+        row_start = text.index("  - id: vendor-a-model-1")
+        row_end = text.index("  - id: vendor-b-model-1")
+        row = text[row_start:row_end]
+        row = row.replace("status: current", "status: retired", 1)
+        row = row.replace("quorum_eligible: true", "quorum_eligible: false", 1)
+        self.write_catalog(text[:row_start] + row + text[row_end:])
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "NOTICE: member 'member-a' references retired model id 'vendor-a-model-1'",
+            result.stderr,
+        )
 
     def test_member_state_malformed_json_fails_closed(self):
         self.member_a.write_text('{"member":', encoding="utf-8")
