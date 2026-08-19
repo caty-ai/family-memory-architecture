@@ -517,9 +517,33 @@ class HotInboxReaderTest(unittest.TestCase):
         rc = self.run_reader(stubborn, extra=["--timeout", "2"])
         self.assertEqual(rc, 1)
         grandchild = int(pid_file.read_text(encoding="utf-8"))
-        time.sleep(0.2)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(grandchild, 0)
+        deadline = time.monotonic() + 5.0
+        # A zombie is dead, not a surviving descendant: the sweep succeeded,
+        # but issue #31's reaping oracle is unobservable with a non-reaping PID 1.
+        # Skip only when /proc confirms that specific condition.
+        proc_root = Path("/proc")
+        proc_stat_available = (proc_root / "self" / "stat").is_file()
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            if proc_stat_available:
+                stat_path = proc_root / str(grandchild) / "stat"
+                try:
+                    stat_fields = (
+                        stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+                    )
+                except (OSError, IndexError):
+                    pass
+                else:
+                    if stat_fields and stat_fields[0] == "Z":
+                        self.skipTest(
+                            "orphaned grandchild is a zombie under non-reaping PID 1 (no reaping init)"
+                        )
+            time.sleep(0.05)
+        else:
+            self.fail("SIGKILL sweep left the grandchild process alive after 5 seconds")
 
     def test_ledger_gc_keeps_fresh_markers_against_syncthing_flap(self):
         target = self.event(event_name())
