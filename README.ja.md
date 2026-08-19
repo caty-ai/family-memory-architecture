@@ -242,7 +242,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 [![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 - **CI**: 全テストスイートを、push・pull request のたびに Python 3.9 / 3.14 で実行し、テスト件数の完全一致もゲートで確認します。ローカルでは `make test` で実行できます（内部で `python3 scripts/tests/run_tests.py` を呼び出します）。
-- **検証済み環境**: macOS（開発ホスト）と `ubuntu-latest`（CI）。孤児プロセスを回収する init がないコンテナでは、設計どおりテスト1件が自動的にスキップされます（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
+- **検証済み環境**: CI マトリクスの OS は `ubuntu-latest`（Python 3.9 / 3.14）です。macOS は CI マトリクス外の開発ホストとして使用しています。孤児プロセスを回収する init がないコンテナでは、設計どおりテスト1件が自動的にスキップされます（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
 - **成熟度**: MIT ライセンスで公開済みです。1台〜数台への導入は現在可能ですが、複数ホストへの配布はまだ進行中です（[配布前チェック](docs/pre-distribution-rc.md)、DRAFT）。
 - **既知の制約**: 複数ホストへの配布・復元リハーサル・連続稼働の観測は、まだ証拠で裏付けられていません（下表を参照）。
 
