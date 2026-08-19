@@ -242,7 +242,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 - **CI**：每次 push 和 pull request 都会在 Python 3.9 / 3.14 上运行完整测试套件，并通过严格的计数关卡核对测试总数。在本地可用 `make test` 运行（该命令封装了 `python3 scripts/tests/run_tests.py`）。
 - **已验证环境**：CI 矩阵的操作系统是 `ubuntu-latest`（Python 3.9 / 3.14）；macOS 仅用作 CI 矩阵之外的开发主机。在没有负责回收孤儿进程的 init 的容器中，有 1 项测试会按设计自动跳过（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
-- **成熟度**：已采用 MIT 许可证发布。目前支持单主机到少量主机的部署；多主机分发仍在推进中（[分发前检查清单](docs/pre-distribution-rc.md)，DRAFT）。
+- **成熟度**：`reference` — 已采用 MIT 许可证发布。目前支持单主机到少量主机的部署；多主机分发仍在推进中（[分发前检查清单](docs/pre-distribution-rc.md)，DRAFT）。
 - **已知限制**：多主机分发、恢复演练和持续运行观测目前尚未得到证据支持（见下表）。
 
 | 状态 | 内容 | 依据 |
