@@ -32,7 +32,7 @@
 - [使いはじめる](#get-started)
 - [安心して使える理由](#safety)
 - [向いていないケース](#not-for-you)
-- [いまできていること、できていないこと](#status)
+- [プロジェクトの状況](#status)
 - [もっと詳しく](#docs)
 - [Family OS の一員です](#family-os)
 - [謝辞](#acknowledgments)
@@ -237,7 +237,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 <a id="status"></a>
 
-## いまできていること、できていないこと
+## プロジェクトの状況
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**: 全テストスイートを、push・pull request のたびに Python 3.9 / 3.14 で実行し、テスト件数の完全一致もゲートで確認します。ローカルでは `make test` で実行できます（内部で `python3 scripts/tests/run_tests.py` を呼び出します）。
+- **検証済み環境**: CI マトリクスの OS は `ubuntu-latest`（Python 3.9 / 3.14）です。macOS は CI マトリクス外の開発ホストとして使用しています。孤児プロセスを回収する init がないコンテナでは、設計どおりテスト1件が自動的にスキップされます（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
+- **成熟度**: MIT ライセンスで公開済みです。1台〜数台への導入は現在可能ですが、複数ホストへの配布はまだ進行中です（[配布前チェック](docs/pre-distribution-rc.md)、DRAFT）。
+- **既知の制約**: 複数ホストへの配布・復元リハーサル・連続稼働の観測は、まだ証拠で裏付けられていません（下表を参照）。
 
 | 状態 | 何が | 根拠 |
 |---|---|---|
@@ -246,9 +253,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 実装済み | 許可リストに載った索引だけへの投入 | `scripts/tests/test_meili_ingest.py` |
 | 実装済み | 故障の見張り（停滞・失敗・停止の区別） | `scripts/tests/test_jobs_framework.py` |
 | 途中 | 複数ホストへの配布・復元リハーサル・連続稼働の観測 | [配布前チェック](docs/pre-distribution-rc.md)（DRAFT） |
-
-テストスイート全体は `make test` で実行できます（内部で `python3 scripts/tests/run_tests.py` を呼び出します）。最新の結果は、フルスイート CI によってリアルタイムで報告されます：
-[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **メモ:** 「途中」は仕上げの作業が進行中という意味で、上の実装済み機能が使えないという意味ではありません。1台〜数台での導入は今日できます。複数ホストへの本格配布・復元リハーサル・実際の鍵での連続運用は、証拠が揃った時点で「実装済み」に上がります。その進み具合は上のリンク先で管理しています。
 

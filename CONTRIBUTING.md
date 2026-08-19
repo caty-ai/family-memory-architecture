@@ -19,19 +19,27 @@ If you are unsure which side a report falls on, open it here and we will move it
 - **Do not invent numbers or results.** Every measured value in docs and manifests is real. If you have not run it, do not write it as fact.
 - **Honest completion.** A change is done when its stated done-conditions pass with evidence, not when it looks done. Pull requests should list which conditions passed and how they were checked.
 
+## Prerequisites
+
+- **Python 3.9 or later.** The CI floor is Python 3.9. The suite uses only the standard library, so there are no packages to install.
+- **Node.js 24.18.1.** CI pins this version before running the suite. There are no npm packages to install; the runtime alone suffices. Without `node`, the openclaw-capture tests self-skip locally, so `make test` still exits 0, while CI's exact-count gate requires zero skips. A no-node local green can therefore still fail CI.
+- **GNU make.** This provides the family-standard entry points used below.
+- **git.** Enable the bundled secret scan once per clone with `git config core.hooksPath .githooks`.
+- **Optional: Docker.** It is needed only to reproduce the environment-dependent SIGTERM-sweep behavior covered by [`scripts/tests/test_hot_inbox_reader.py`](scripts/tests/test_hot_inbox_reader.py); see [issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31).
+
 ## Checking your change
 
-The test suite and every bundled script need only Python 3 and its standard library:
+Run the whole test suite through the family-standard entry point:
 
 ```bash
-python3 scripts/tests/run_tests.py          # aggregate suite
-python3 scripts/tests/test_write_guard.py    # run individually as needed
-python3 scripts/tests/test_injection_lint.py
+make test
 ```
+
+This wraps `python3 scripts/tests/run_tests.py`. `make lint` also exists for parity with family CI and is currently a no-op.
 
 Before opening a pull request, confirm:
 
-- The suite passes (`failed=0 errors=0`), plus any individually-run test files you touched.
+- The whole suite passes.
 - Every relative link and in-page anchor in changed docs resolves.
 - No personal paths, internal host names, IP addresses, credentials, or private repository names appear anywhere in the diff. The pre-commit hook (`.githooks/pre-commit`) runs the bundled secret scan — enable it once per clone with `git config core.hooksPath .githooks`, and leave it enabled.
 
