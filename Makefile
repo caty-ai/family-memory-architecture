@@ -5,6 +5,8 @@
 
 test:
 	python3 scripts/tests/run_tests.py
+	python3 -B scripts/check_publication_gate.py --selftest
+	python3 -B scripts/check_publication_gate.py --root . --account-slug shojikumaru
 
 lint:
 	# No lint tooling exists in this repo yet. This is a deliberate no-op

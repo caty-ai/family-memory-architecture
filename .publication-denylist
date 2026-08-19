@@ -1,0 +1,8 @@
+# Blocks workstation and Linux home paths that identify the private operator.
+personal-filesystem-paths	/(?:Users|home)/shojikumaru(?:/|\b)
+# Blocks every IPv4 address in Tailscale's 100.64.0.0/10 allocation, including the known 100.104.x.x tailnet host prefix.
+tailscale-cgnat-ip	(?<![0-9.])100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?![0-9.])
+# Blocks the private SSH account name from published examples and documentation.
+private-ssh-username	\bjikumaru-sho\b
+# Blocks the private mirror path while leaving the legitimate account slug to the URL check.
+private-repository	\bshojikumaru/family-memory-architecture\b
