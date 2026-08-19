@@ -246,7 +246,8 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 | Implemented | Failure watch (distinguishing stalls, failures, stops) | `scripts/tests/test_jobs_framework.py` |
 | In progress | Multi-host distribution, restore rehearsal, sustained-operation observation | [Pre-distribution checklist](docs/pre-distribution-rc.md) (DRAFT) |
 
-Run the whole test suite with `python3 scripts/tests/run_tests.py` (two files, `test_write_guard.py` and `test_injection_lint.py`, are not aggregated — run them individually). As of 2026-08-05, a full run finished with passed=358 / failed=0 / errors=0.
+Run the whole test suite with `make test` (wraps `python3 scripts/tests/run_tests.py`). Current results are reported live by the full-suite CI:
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **Note:** "In progress" means the finishing work is still underway — not that the implemented features above are unusable. A setup of one to a few machines works today. Full multi-host distribution, restore rehearsal, and sustained operation with real keys move to "implemented" once their evidence is in; the checklist tracking that is linked above.
 

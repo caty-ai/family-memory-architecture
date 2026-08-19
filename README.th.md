@@ -246,7 +246,8 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | ทำเสร็จแล้ว | การเฝ้าดูความล้มเหลว (แยกแยะระหว่างค้างอยู่ / ล้มเหลว / หยุด) | `scripts/tests/test_jobs_framework.py` |
 | กำลังดำเนินการ | การกระจายหลายโฮสต์, การซ้อมกู้คืน, การสังเกตการทำงานต่อเนื่อง | [รายการตรวจสอบก่อนกระจาย](docs/pre-distribution-rc.md) (DRAFT) |
 
-รันชุดทดสอบทั้งหมดได้ด้วย `python3 scripts/tests/run_tests.py` (ไฟล์ `test_write_guard.py` และ `test_injection_lint.py` ไม่ได้รวมอยู่ในตัวรัน ให้รันแยกต่างหาก) ณ วันที่ 2026-08-05 การรันแบบเต็มจบลงด้วยผลลัพธ์ passed=358 / failed=0 / errors=0
+รันชุดทดสอบทั้งหมดได้ด้วย `make test` (ซึ่งเรียก `python3 scripts/tests/run_tests.py` ภายใน) ผลลัพธ์ปัจจุบันรายงานแบบเรียลไทม์โดย CI ของชุดทดสอบทั้งหมด:
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **หมายเหตุ:** "กำลังดำเนินการ" หมายถึงงานเก็บรายละเอียดยังเดินอยู่ ไม่ได้แปลว่าฟีเจอร์ที่ทำเสร็จแล้วด้านบนใช้ไม่ได้ การติดตั้งบนหนึ่งถึงไม่กี่เครื่องทำได้ตั้งแต่วันนี้ ส่วนการกระจายหลายโฮสต์เต็มรูปแบบ การซ้อมกู้คืน และการใช้งานต่อเนื่องด้วยคีย์จริง จะเลื่อนขึ้นเป็น "ทำเสร็จแล้ว" เมื่อหลักฐานครบ โดยติดตามความคืบหน้าได้จากรายการตรวจสอบที่ลิงก์ไว้ด้านบน
 

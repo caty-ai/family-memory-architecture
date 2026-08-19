@@ -245,7 +245,8 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 已实现 | 故障监测（区分停滞、失败、停止） | `scripts/tests/test_jobs_framework.py` |
 | 进行中 | 多主机分发、恢复演练、长时间运行观测 | [分发前检查清单](docs/pre-distribution-rc.md)（DRAFT） |
 
-可以用 `python3 scripts/tests/run_tests.py` 一次性运行全部测试（`test_write_guard.py` 与 `test_injection_lint.py` 两个文件不在汇总之内，需单独运行）。截至 2026-08-05，一次完整运行的结果是 passed=358 / failed=0 / errors=0。
+可以使用 `make test` 运行完整测试套件（该命令封装了 `python3 scripts/tests/run_tests.py`）。当前结果由完整测试套件 CI 实时报告：
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **备注:** 「进行中」指的是收尾工作仍在进行，并不代表上面已实现的功能不能用。一台到几台机器的部署今天就可以完成。向多台主机的正式分发、恢复演练、使用真实密钥的持续运行，会在证据齐全后升级为「已实现」——进度就记录在上面链接的检查清单里。
 

@@ -246,7 +246,8 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 実装済み | 故障の見張り（停滞・失敗・停止の区別） | `scripts/tests/test_jobs_framework.py` |
 | 途中 | 複数ホストへの配布・復元リハーサル・連続稼働の観測 | [配布前チェック](docs/pre-distribution-rc.md)（DRAFT） |
 
-テストは `python3 scripts/tests/run_tests.py` で一括実行できます（`test_write_guard.py` と `test_injection_lint.py` の2本は集計対象外なので個別に実行します）。2026-08-05 時点の一括実行の結果は passed=358 / failed=0 / errors=0 でした。
+テストスイート全体は `make test` で実行できます（内部で `python3 scripts/tests/run_tests.py` を呼び出します）。最新の結果は、フルスイート CI によってリアルタイムで報告されます：
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **メモ:** 「途中」は仕上げの作業が進行中という意味で、上の実装済み機能が使えないという意味ではありません。1台〜数台での導入は今日できます。複数ホストへの本格配布・復元リハーサル・実際の鍵での連続運用は、証拠が揃った時点で「実装済み」に上がります。その進み具合は上のリンク先で管理しています。
 
