@@ -32,7 +32,7 @@ We fix that with structure: one short shared page that everyone reads, with deci
 - [Get started](#get-started)
 - [Why it is safe to use](#safety)
 - [When it is not for you](#not-for-you)
-- [What works today, and what does not yet](#status)
+- [Project status](#status)
 - [Learn more](#docs)
 - [Part of Family OS](#family-os)
 - [Acknowledgments](#acknowledgments)
@@ -237,7 +237,14 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 
 <a id="status"></a>
 
-## What works today, and what does not yet
+## Project status
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**: The full test suite runs on every push and pull request on Python 3.9 and 3.14, with an exact-count gate. Run it locally with `make test` (wraps `python3 scripts/tests/run_tests.py`).
+- **Verified environments**: macOS (development hosts) and `ubuntu-latest` (CI). In containers without a reaping init, one test self-skips by design ([issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)).
+- **Maturity**: Published under the MIT License. Single-host to few-host deployments work today; multi-host distribution is still in progress ([Pre-distribution checklist](docs/pre-distribution-rc.md), DRAFT).
+- **Known limitations**: Multi-host distribution, restore rehearsal, and sustained-operation observation are not yet evidence-backed (see the table below).
 
 | State | What | Evidence |
 |---|---|---|
@@ -246,9 +253,6 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 | Implemented | Ingest restricted to allow-listed indexes | `scripts/tests/test_meili_ingest.py` |
 | Implemented | Failure watch (distinguishing stalls, failures, stops) | `scripts/tests/test_jobs_framework.py` |
 | In progress | Multi-host distribution, restore rehearsal, sustained-operation observation | [Pre-distribution checklist](docs/pre-distribution-rc.md) (DRAFT) |
-
-Run the whole test suite with `make test` (wraps `python3 scripts/tests/run_tests.py`). Current results are reported live by the full-suite CI:
-[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **Note:** "In progress" means the finishing work is still underway — not that the implemented features above are unusable. A setup of one to a few machines works today. Full multi-host distribution, restore rehearsal, and sustained operation with real keys move to "implemented" once their evidence is in; the checklist tracking that is linked above.
 

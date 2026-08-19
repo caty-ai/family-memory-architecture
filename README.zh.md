@@ -32,7 +32,7 @@
 - [开始使用](#get-started)
 - [为什么可以放心使用](#safety)
 - [不适合你的情况](#not-for-you)
-- [目前做到了什么程度，还有哪些没做](#status)
+- [项目状态](#status)
 - [了解更多](#docs)
 - [Family OS 的一员](#family-os)
 - [致谢](#acknowledgments)
@@ -236,7 +236,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 <a id="status"></a>
 
-## 目前做到了什么程度，还有哪些没做
+## 项目状态
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**：每次 push 和 pull request 都会在 Python 3.9 / 3.14 上运行完整测试套件，并通过严格的计数关卡核对测试总数。在本地可用 `make test` 运行（该命令封装了 `python3 scripts/tests/run_tests.py`）。
+- **已验证环境**：macOS（开发主机）和 `ubuntu-latest`（CI）。在没有负责回收孤儿进程的 init 的容器中，有 1 项测试会按设计自动跳过（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
+- **成熟度**：已采用 MIT 许可证发布。目前支持单主机到少量主机的部署；多主机分发仍在推进中（[分发前检查清单](docs/pre-distribution-rc.md)，DRAFT）。
+- **已知限制**：多主机分发、恢复演练和持续运行观测目前尚未得到证据支持（见下表）。
 
 | 状态 | 内容 | 依据 |
 |---|---|---|
@@ -245,9 +252,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 已实现 | 仅向许可列表中的索引投入数据 | `scripts/tests/test_meili_ingest.py` |
 | 已实现 | 故障监测（区分停滞、失败、停止） | `scripts/tests/test_jobs_framework.py` |
 | 进行中 | 多主机分发、恢复演练、长时间运行观测 | [分发前检查清单](docs/pre-distribution-rc.md)（DRAFT） |
-
-可以使用 `make test` 运行完整测试套件（该命令封装了 `python3 scripts/tests/run_tests.py`）。当前结果由完整测试套件 CI 实时报告：
-[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
 > **备注:** 「进行中」指的是收尾工作仍在进行，并不代表上面已实现的功能不能用。一台到几台机器的部署今天就可以完成。向多台主机的正式分发、恢复演练、使用真实密钥的持续运行，会在证据齐全后升级为「已实现」——进度就记录在上面链接的检查清单里。
 
