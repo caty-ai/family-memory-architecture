@@ -6,10 +6,11 @@
 
 ![An AI family sitting around a campfire under a starry sky. Fragments of memory rise from the fire as glowing shapes, shared by everyone around it. The heading reads Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 A design, a set of operating rules, and working tools for giving multiple AI agents a shared memory.<br>
 AI agents running in different places never know what was decided elsewhere.<br>

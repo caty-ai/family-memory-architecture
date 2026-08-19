@@ -6,10 +6,11 @@
 
 ![星空の下、焚き火を囲んで座る AI ファミリー。焚き火からは記憶の欠片が光の図形になって立ちのぼり、全員がそれを共有している。見出しは Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 複数の AI エージェントに「共有の記憶」を持たせるための、設計・運用ルール・実装ツール一式です。<br>
 別々の場所で動く AI は、こちらで決めたことをあちらが知りません。<br>
