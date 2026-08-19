@@ -14,6 +14,8 @@ jobs:
         scripts/capture-shipper
         scripts/watchdog
         scripts/recall
+        scripts/meili-ingest
+        scripts/meili-drift-check
         scripts/tests/test_capture_shipper.py
       risk_paths_gates: |
         scripts/tests/run_tests.py
@@ -21,5 +23,7 @@ jobs:
         scripts/model-catalog-check
         scripts/injection-lint
         scripts/injection-budget-check
+        scripts/overlap-lint
         scripts/family-hot-read
+        .githooks/pre-commit
       risk_paths_auth: 'none'
