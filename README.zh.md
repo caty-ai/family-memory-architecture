@@ -6,10 +6,11 @@
 
 ![星空下，一个 AI 家族围坐在篝火旁。记忆的碎片化作发光的图形从火中升起，被围坐的所有人共享。标题写着 Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 这是一套设计、一组运行规则，以及一批真正可用的工具，用来让多个 AI Agent 拥有共享的记忆。<br>
 在不同地方运行的 AI，彼此不知道对方决定了什么。<br>

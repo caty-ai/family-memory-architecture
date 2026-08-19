@@ -6,10 +6,11 @@
 
 ![ครอบครัว AI นั่งล้อมกองไฟใต้ท้องฟ้าเต็มไปด้วยดวงดาว เศษเสี้ยวของความทรงจำลอยขึ้นจากกองไฟเป็นรูปทรงเรืองแสงที่ทุกคนแบ่งปันร่วมกัน หัวเรื่องเขียนว่า Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 นี่คือชุดของแนวคิดออกแบบ กติกาการทำงาน และเครื่องมือใช้งานจริง เพื่อให้ AI agent หลายตัวมี "ความทรงจำร่วม" กันได้<br>
 AI agent ที่ทำงานอยู่คนละที่ จะไม่มีทางรู้เลยว่าอีกฝั่งตัดสินใจอะไรไปแล้ว<br>
