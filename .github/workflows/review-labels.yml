@@ -1,0 +1,25 @@
+name: Risk Review Gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+permissions: {contents: read}
+concurrency: {group: 'risk-review-${{ github.event.pull_request.number }}', cancel-in-progress: true}
+jobs:
+  risk-review-gate:
+    uses: caty-ai/family-dev-handbook/.github/workflows/reusable-review-labels.yml@ci-v1
+    permissions: {contents: read, issues: read, pull-requests: write}
+    with:
+      risk_paths_billing: 'none'
+      risk_paths_outbound: |
+        scripts/capture-shipper
+        scripts/watchdog
+        scripts/recall
+        scripts/tests/test_capture_shipper.py
+      risk_paths_gates: |
+        scripts/tests/run_tests.py
+        scripts/secret-scan
+        scripts/model-catalog-check
+        scripts/injection-lint
+        scripts/injection-budget-check
+        scripts/family-hot-read
+      risk_paths_auth: 'none'
