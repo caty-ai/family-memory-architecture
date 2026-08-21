@@ -2,11 +2,11 @@
 # - This unfiltered workflow owns repository-wide push and pull-request coverage.
 #   All matrix legs are candidates for required status checks; unlike a path-filtered
 #   workflow, they run instead of remaining pending on unrelated pull requests.
-# - catalog-check.yml retains focused ownership of manifests/**, policies/**,
-#   scripts/model-catalog-check, scripts/tests/test_model_catalog.py,
-#   scripts/tests/run_tests.py, and .github/workflows/catalog-check.yml.
-# - Catalog tests intentionally run in both workflows. catalog-check.yml protects its
-#   focused stdlib-only (-S) contract, while this workflow protects repo integration.
+# - Catalog checks run as the catalog-check job in test-lint.yml for pull requests.
+#   Push coverage remains here through run_tests.py, which loads
+#   scripts/tests/test_model_catalog.py.
+# - The focused stdlib-only (-S) catalog contract is pull-request-only in
+#   test-lint.yml, while this workflow protects repo integration on pushes and PRs.
 
 name: Full test suite
 

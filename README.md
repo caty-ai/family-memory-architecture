@@ -241,9 +241,9 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 
 [![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 
-- **CI**: The full test suite runs on every push and pull request on Python 3.9 and 3.14, with an exact-count gate. Run it locally with `make test` (wraps `python3 scripts/tests/run_tests.py`).
+- **CI**: The full test suite runs on every push and pull request on Python 3.9 and 3.14, with an exact-count gate. Run it locally with `make test` (runs the full suite plus the publication gate; use `python3 scripts/tests/run_tests.py` to run the suite directly).
 - **Verified environments**: `ubuntu-latest` is the CI matrix OS (Python 3.9 / 3.14); macOS is used as a development host outside the CI matrix. In containers without a reaping init, one test self-skips by design ([issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)).
-- **Maturity**: Published under the MIT License. Single-host to few-host deployments work today; multi-host distribution is still in progress ([Pre-distribution checklist](docs/pre-distribution-rc.md), DRAFT).
+- **Maturity**: `reference` — Published under the MIT License. Single-host to few-host deployments work today; multi-host distribution is still in progress ([Pre-distribution checklist](docs/pre-distribution-rc.md), DRAFT).
 - **Known limitations**: Multi-host distribution, restore rehearsal, and sustained-operation observation are not yet evidence-backed (see the table below).
 
 | State | What | Evidence |

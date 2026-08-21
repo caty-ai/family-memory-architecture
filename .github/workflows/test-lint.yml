@@ -1,29 +1,15 @@
-name: Model catalog check
-
+name: Test + Lint
 on:
-  workflow_dispatch:
-  push:
-    paths:
-      - "manifests/**"
-      - "policies/**"
-      - "scripts/model-catalog-check"
-      - "scripts/tests/test_model_catalog.py"
-      - "scripts/tests/run_tests.py"
-      - ".github/workflows/catalog-check.yml"
   pull_request:
-    paths:
-      - "manifests/**"
-      - "policies/**"
-      - "scripts/model-catalog-check"
-      - "scripts/tests/test_model_catalog.py"
-      - "scripts/tests/run_tests.py"
-      - ".github/workflows/catalog-check.yml"
-
-permissions:
-  contents: read
-
+permissions: {contents: read}
+concurrency: {group: 'test-lint-${{ github.event.pull_request.number }}', cancel-in-progress: true}
 jobs:
-  validate:
+  test-lint:
+    uses: caty-ai/family-dev-handbook/.github/workflows/reusable-test-lint.yml@ci-v1
+    permissions: {contents: read}
+    with:
+      run_macos: true
+  catalog-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -43,3 +29,11 @@ jobs:
           fi
       - name: Run catalog tests without site packages
         run: python3 -S scripts/tests/test_model_catalog.py
+  publication-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Self-test publication gate
+        run: python3 -B scripts/check_publication_gate.py --selftest
+      - name: Check publication gate
+        run: python3 -B scripts/check_publication_gate.py --root . --account-slug shojikumaru
