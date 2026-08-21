@@ -6,10 +6,11 @@
 
 ![An AI family sitting around a campfire under a starry sky. Fragments of memory rise from the fire as glowing shapes, shared by everyone around it. The heading reads Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 A design, a set of operating rules, and working tools for giving multiple AI agents a shared memory.<br>
 AI agents running in different places never know what was decided elsewhere.<br>
@@ -31,7 +32,7 @@ We fix that with structure: one short shared page that everyone reads, with deci
 - [Get started](#get-started)
 - [Why it is safe to use](#safety)
 - [When it is not for you](#not-for-you)
-- [What works today, and what does not yet](#status)
+- [Project status](#status)
 - [Learn more](#docs)
 - [Part of Family OS](#family-os)
 - [Acknowledgments](#acknowledgments)
@@ -236,7 +237,14 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 
 <a id="status"></a>
 
-## What works today, and what does not yet
+## Project status
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**: The full test suite runs on every push and pull request on Python 3.9 and 3.14, with an exact-count gate. Run it locally with `make test` (runs the full suite plus the publication gate; use `python3 scripts/tests/run_tests.py` to run the suite directly).
+- **Verified environments**: `ubuntu-latest` is the CI matrix OS (Python 3.9 / 3.14); macOS is used as a development host outside the CI matrix. In containers without a reaping init, one test self-skips by design ([issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)).
+- **Maturity**: `reference` — Published under the MIT License. Single-host to few-host deployments work today; multi-host distribution is still in progress ([Pre-distribution checklist](docs/pre-distribution-rc.md), DRAFT).
+- **Known limitations**: Multi-host distribution, restore rehearsal, and sustained-operation observation are not yet evidence-backed (see the table below).
 
 | State | What | Evidence |
 |---|---|---|
@@ -245,8 +253,6 @@ If you've judged it a fit, here is an honest account of what's done and what's i
 | Implemented | Ingest restricted to allow-listed indexes | `scripts/tests/test_meili_ingest.py` |
 | Implemented | Failure watch (distinguishing stalls, failures, stops) | `scripts/tests/test_jobs_framework.py` |
 | In progress | Multi-host distribution, restore rehearsal, sustained-operation observation | [Pre-distribution checklist](docs/pre-distribution-rc.md) (DRAFT) |
-
-Run the whole test suite with `python3 scripts/tests/run_tests.py` (two files, `test_write_guard.py` and `test_injection_lint.py`, are not aggregated — run them individually). As of 2026-08-05, a full run finished with passed=358 / failed=0 / errors=0.
 
 > **Note:** "In progress" means the finishing work is still underway — not that the implemented features above are unusable. A setup of one to a few machines works today. Full multi-host distribution, restore rehearsal, and sustained operation with real keys move to "implemented" once their evidence is in; the checklist tracking that is linked above.
 
@@ -296,7 +302,7 @@ Part of the **Caty AI family** — open tools for running a family of AI agents.
 | Vertical · foundation | [Caty Agent Harness](https://github.com/caty-ai/caty-agent-harness) | Task backbone for AI agents — retries, checkpoints, and honest completion | published, MIT |
 | Vertical | [context-kit](https://github.com/caty-ai/context-kit) | Five-piece context hygiene kit for one agent — bounded output, delegation briefs, safety guards, recall | published, MIT |
 | Vertical | [Persona Engine](https://github.com/caty-ai/persona-engine) | Gives an agent a persona — layered personality and graded emotion | published, MIT |
-| Vertical | **Persona Growth Loop** | Grows the persona itself — minimal, idempotent proposals | publication in preparation |
+| Vertical | [Persona Growth Loop](https://github.com/caty-ai/persona-growth-loop) | Grows the persona itself — minimal, idempotent proposals | published, MIT |
 | Vertical | [X Collector](https://github.com/caty-ai/x-collector) | Turns X and the web into one daily digest — for people and agents | published, MIT |
 | Vertical | [Self Growth Loop](https://github.com/caty-ai/self-growth-loop) | Lets an agent grow its own abilities — proposals, governance, adoption records | published, MIT |
 | Horizontal · foundation | **Family Memory Architecture** | The memory bus — how the family shares what it knows | published, MIT |

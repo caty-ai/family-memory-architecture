@@ -6,10 +6,11 @@
 
 ![ครอบครัว AI นั่งล้อมกองไฟใต้ท้องฟ้าเต็มไปด้วยดวงดาว เศษเสี้ยวของความทรงจำลอยขึ้นจากกองไฟเป็นรูปทรงเรืองแสงที่ทุกคนแบ่งปันร่วมกัน หัวเรื่องเขียนว่า Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 นี่คือชุดของแนวคิดออกแบบ กติกาการทำงาน และเครื่องมือใช้งานจริง เพื่อให้ AI agent หลายตัวมี "ความทรงจำร่วม" กันได้<br>
 AI agent ที่ทำงานอยู่คนละที่ จะไม่มีทางรู้เลยว่าอีกฝั่งตัดสินใจอะไรไปแล้ว<br>
@@ -31,7 +32,7 @@ AI agent ที่ทำงานอยู่คนละที่ จะไม�
 - [เริ่มต้นใช้งาน](#get-started)
 - [ทำไมถึงใช้ได้อย่างปลอดภัย](#safety)
 - [เมื่อไหร่ที่ไม่เหมาะกับคุณ](#not-for-you)
-- [สิ่งที่ทำได้แล้ว และสิ่งที่ยังไม่ได้](#status)
+- [สถานะโครงการ](#status)
 - [เรียนรู้เพิ่มเติม](#docs)
 - [เป็นส่วนหนึ่งของ Family OS](#family-os)
 - [ขอบคุณ](#acknowledgments)
@@ -236,7 +237,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 <a id="status"></a>
 
-## สิ่งที่ทำได้แล้ว และสิ่งที่ยังไม่ได้
+## สถานะโครงการ
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**: ชุดทดสอบเต็มทำงานทุกครั้งที่มีการ push และ pull request บน Python 3.9 / 3.14 พร้อมเกตที่ตรวจสอบว่าจำนวนการทดสอบตรงกันทุกครั้ง รันในเครื่องได้ด้วย `make test` (ซึ่งรันทั้งชุดทดสอบเต็มและเกตการเผยแพร่ ส่วนคำสั่งสำหรับรันชุดทดสอบโดยตรงคือ `python3 scripts/tests/run_tests.py`)
+- **สภาพแวดล้อมที่ตรวจสอบแล้ว**: `ubuntu-latest` คือ OS ในเมทริกซ์ CI (Python 3.9 / 3.14) ส่วน macOS ใช้เป็นเครื่องสำหรับพัฒนานอกเมทริกซ์ CI ในคอนเทนเนอร์ที่ไม่มี init คอยเก็บ orphan process การทดสอบ 1 รายการจะข้ามโดยอัตโนมัติตามที่ออกแบบไว้ ([issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31))
+- **ระดับความพร้อม**: `reference` — เผยแพร่แล้วภายใต้สัญญาอนุญาต MIT การติดตั้งบนหนึ่งถึงไม่กี่โฮสต์ใช้งานได้ในปัจจุบัน ส่วนการกระจายหลายโฮสต์ยังอยู่ระหว่างดำเนินการ ([รายการตรวจสอบก่อนกระจาย](docs/pre-distribution-rc.md), DRAFT)
+- **ข้อจำกัดที่ทราบ**: การกระจายหลายโฮสต์ การซ้อมกู้คืน และการสังเกตการทำงานต่อเนื่องยังไม่มีหลักฐานรองรับ (ดูตารางด้านล่าง)
 
 | สถานะ | อะไร | หลักฐาน |
 |---|---|---|
@@ -245,8 +253,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | ทำเสร็จแล้ว | การนำเข้าที่จำกัดเฉพาะดัชนีในรายการอนุญาต | `scripts/tests/test_meili_ingest.py` |
 | ทำเสร็จแล้ว | การเฝ้าดูความล้มเหลว (แยกแยะระหว่างค้างอยู่ / ล้มเหลว / หยุด) | `scripts/tests/test_jobs_framework.py` |
 | กำลังดำเนินการ | การกระจายหลายโฮสต์, การซ้อมกู้คืน, การสังเกตการทำงานต่อเนื่อง | [รายการตรวจสอบก่อนกระจาย](docs/pre-distribution-rc.md) (DRAFT) |
-
-รันชุดทดสอบทั้งหมดได้ด้วย `python3 scripts/tests/run_tests.py` (ไฟล์ `test_write_guard.py` และ `test_injection_lint.py` ไม่ได้รวมอยู่ในตัวรัน ให้รันแยกต่างหาก) ณ วันที่ 2026-08-05 การรันแบบเต็มจบลงด้วยผลลัพธ์ passed=358 / failed=0 / errors=0
 
 > **หมายเหตุ:** "กำลังดำเนินการ" หมายถึงงานเก็บรายละเอียดยังเดินอยู่ ไม่ได้แปลว่าฟีเจอร์ที่ทำเสร็จแล้วด้านบนใช้ไม่ได้ การติดตั้งบนหนึ่งถึงไม่กี่เครื่องทำได้ตั้งแต่วันนี้ ส่วนการกระจายหลายโฮสต์เต็มรูปแบบ การซ้อมกู้คืน และการใช้งานต่อเนื่องด้วยคีย์จริง จะเลื่อนขึ้นเป็น "ทำเสร็จแล้ว" เมื่อหลักฐานครบ โดยติดตามความคืบหน้าได้จากรายการตรวจสอบที่ลิงก์ไว้ด้านบน
 
@@ -296,7 +302,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | แกนตั้ง · รากฐาน | [Caty Agent Harness](https://github.com/caty-ai/caty-agent-harness) | แกนงานของเอเจนต์ AI — การลองใหม่ เช็คพอยต์ และการตัดสินว่าเสร็จจริง | เปิดแล้ว・MIT |
 | แกนตั้ง | [context-kit](https://github.com/caty-ai/context-kit) | ชุดดูแลคอนเท็กซ์สำหรับเอเจนต์หนึ่งตัว — จำกัดเอาต์พุตขนาดใหญ่, ตรวจ brief การมอบงาน, การ์ดความปลอดภัย, ค้นความทรงจำ | เปิดแล้ว・MIT |
 | แกนตั้ง | [Persona Engine](https://github.com/caty-ai/persona-engine) | มอบบุคลิกให้เอเจนต์ — เลเยอร์บุคลิกและอารมณ์แบบไล่ระดับ | เปิดแล้ว・MIT |
-| แกนตั้ง | **Persona Growth Loop** | พัฒนาบุคลิกของเอเจนต์ — สร้างข้อเสนอแบบน้อยที่สุดและทำซ้ำได้ | กำลังเตรียมเปิด |
+| แกนตั้ง | [Persona Growth Loop](https://github.com/caty-ai/persona-growth-loop) | พัฒนาบุคลิกของเอเจนต์ — สร้างข้อเสนอแบบน้อยที่สุดและทำซ้ำได้ | เปิดแล้ว・MIT |
 | แกนตั้ง | [X Collector](https://github.com/caty-ai/x-collector) | รวบรวมข้อมูลจาก X และเว็บเป็นสรุปวันละฉบับ — สำหรับคนและเอเจนต์ | เปิดแล้ว・MIT |
 | แกนตั้ง | [Self Growth Loop](https://github.com/caty-ai/self-growth-loop) | วงจรให้เอเจนต์พัฒนาความสามารถของตัวเอง — ข้อเสนอ ธรรมาภิบาล และบันทึกการนำไปใช้ | เปิดแล้ว・MIT |
 | แกนนอน · รากฐาน | **Family Memory Architecture** | บัสความทรงจำ — ชั้นที่ครอบครัวใช้แบ่งปันสิ่งที่รู้ | เปิดแล้ว・MIT |

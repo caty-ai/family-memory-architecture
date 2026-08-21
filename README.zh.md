@@ -6,10 +6,11 @@
 
 ![星空下，一个 AI 家族围坐在篝火旁。记忆的碎片化作发光的图形从火中升起，被围坐的所有人共享。标题写着 Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 这是一套设计、一组运行规则，以及一批真正可用的工具，用来让多个 AI Agent 拥有共享的记忆。<br>
 在不同地方运行的 AI，彼此不知道对方决定了什么。<br>
@@ -31,7 +32,7 @@
 - [开始使用](#get-started)
 - [为什么可以放心使用](#safety)
 - [不适合你的情况](#not-for-you)
-- [目前做到了什么程度，还有哪些没做](#status)
+- [项目状态](#status)
 - [了解更多](#docs)
 - [Family OS 的一员](#family-os)
 - [致谢](#acknowledgments)
@@ -235,7 +236,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 <a id="status"></a>
 
-## 目前做到了什么程度，还有哪些没做
+## 项目状态
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**：每次 push 和 pull request 都会在 Python 3.9 / 3.14 上运行完整测试套件，并通过严格的计数关卡核对测试总数。在本地可用 `make test` 运行（该命令会运行完整测试套件和发布关卡；如需直接运行测试套件，请使用 `python3 scripts/tests/run_tests.py`）。
+- **已验证环境**：CI 矩阵的操作系统是 `ubuntu-latest`（Python 3.9 / 3.14）；macOS 仅用作 CI 矩阵之外的开发主机。在没有负责回收孤儿进程的 init 的容器中，有 1 项测试会按设计自动跳过（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
+- **成熟度**：`reference` — 已采用 MIT 许可证发布。目前支持单主机到少量主机的部署；多主机分发仍在推进中（[分发前检查清单](docs/pre-distribution-rc.md)，DRAFT）。
+- **已知限制**：多主机分发、恢复演练和持续运行观测目前尚未得到证据支持（见下表）。
 
 | 状态 | 内容 | 依据 |
 |---|---|---|
@@ -244,8 +252,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 已实现 | 仅向许可列表中的索引投入数据 | `scripts/tests/test_meili_ingest.py` |
 | 已实现 | 故障监测（区分停滞、失败、停止） | `scripts/tests/test_jobs_framework.py` |
 | 进行中 | 多主机分发、恢复演练、长时间运行观测 | [分发前检查清单](docs/pre-distribution-rc.md)（DRAFT） |
-
-可以用 `python3 scripts/tests/run_tests.py` 一次性运行全部测试（`test_write_guard.py` 与 `test_injection_lint.py` 两个文件不在汇总之内，需单独运行）。截至 2026-08-05，一次完整运行的结果是 passed=358 / failed=0 / errors=0。
 
 > **备注:** 「进行中」指的是收尾工作仍在进行，并不代表上面已实现的功能不能用。一台到几台机器的部署今天就可以完成。向多台主机的正式分发、恢复演练、使用真实密钥的持续运行，会在证据齐全后升级为「已实现」——进度就记录在上面链接的检查清单里。
 
@@ -295,7 +301,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 纵轴・基座 | [Caty Agent Harness](https://github.com/caty-ai/caty-agent-harness) | AI 智能体的任务基座 — 重试、检查点与完成判定 | 已公开・MIT |
 | 纵轴 | [context-kit](https://github.com/caty-ai/context-kit) | 面向单个智能体的上下文卫生工具组 — 限制大输出、委托简报校验、安全防护、记忆检索 | 已公开・MIT |
 | 纵轴 | [Persona Engine](https://github.com/caty-ai/persona-engine) | 为智能体赋予人格 — 分层人格与情感渐变 | 已公开・MIT |
-| 纵轴 | **Persona Growth Loop** | 让人格本身成长 — 以最小且幂等的提案 | 准备公开中 |
+| 纵轴 | [Persona Growth Loop](https://github.com/caty-ai/persona-growth-loop) | 让人格本身成长 — 以最小且幂等的提案 | 已公开・MIT |
 | 纵轴 | [X Collector](https://github.com/caty-ai/x-collector) | 把 X 与网络素材汇成每日一份摘要 — 给人也给智能体 | 已公开・MIT |
 | 纵轴 | [Self Growth Loop](https://github.com/caty-ai/self-growth-loop) | 让智能体自我成长的循环 — 提案、治理与采用记录 | 已公开・MIT |
 | 横轴・基座 | **Family Memory Architecture** | 记忆总线 — 家族共享所知的一层 | 已公开・MIT |

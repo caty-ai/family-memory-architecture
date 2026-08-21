@@ -1,0 +1,82 @@
+# Trigger ownership:
+# - This unfiltered workflow owns repository-wide push and pull-request coverage.
+#   All matrix legs are candidates for required status checks; unlike a path-filtered
+#   workflow, they run instead of remaining pending on unrelated pull requests.
+# - Catalog checks run as the catalog-check job in test-lint.yml for pull requests.
+#   Push coverage remains here through run_tests.py, which loads
+#   scripts/tests/test_model_catalog.py.
+# - The focused stdlib-only (-S) catalog contract is pull-request-only in
+#   test-lint.yml, while this workflow protects repo integration on pushes and PRs.
+
+name: Full test suite
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          # 3.9 is the intentional version floor (EOL upstream; matches the
+          # repo's 3.9 compatibility contract) — do not "modernize" it away.
+          - "3.9.25"
+          - "3.14.6"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up Node.js 24.18.1
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.1"
+          package-manager-cache: false
+      # The suite is importable without site-packages extras — verified without PyYAML.
+      - name: Run full test suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 -B scripts/tests/run_tests.py 2>&1 | tee full-suite.log
+      - name: Require all 469 tests
+        shell: bash
+        run: |
+          # Exact-count gate: a dropped test module, a failure, or an unexpected
+          # skip all break this line. Adding or removing tests? Bump the count
+          # here (both the string and the step name above).
+          # tail-anchored so a test that happens to print the success line
+          # cannot mask count drift elsewhere in the log.
+          tail -n 5 full-suite.log | grep -Fx 'Final summary: passed=469 failed=0 errors=0 skipped=0 total=469'
+
+  # Stable-named summary gate for use as a required status check. The matrix
+  # leg names embed patch versions ("Python 3.9.25"), so requiring them
+  # directly would force a protection-settings update on every version bump;
+  # if branch protection is ever enabled, require this job's context instead.
+  full-suite:
+    name: full-suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [test]
+    # always() + explicit result check is load-bearing: without it, a failed
+    # matrix leg leaves this job "skipped", and GitHub treats a skipped
+    # required check as passing — red CI would silently satisfy the gate.
+    if: always()
+    steps:
+      - name: Require every matrix leg to succeed
+        shell: bash
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$TEST_RESULT" = "success"

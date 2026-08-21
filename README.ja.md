@@ -6,10 +6,11 @@
 
 ![星空の下、焚き火を囲んで座る AI ファミリー。焚き火からは記憶の欠片が光の図形になって立ちのぼり、全員がそれを共有している。見出しは Family Memory Architecture — One shared surface. Separate identities.](assets/readme/hero.png)
 
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey)
 ![python](https://img.shields.io/badge/python-3-blue)
-![status](https://img.shields.io/badge/status-published-brightgreen)
+![status](https://img.shields.io/badge/status-published-lightgrey)
 
 複数の AI エージェントに「共有の記憶」を持たせるための、設計・運用ルール・実装ツール一式です。<br>
 別々の場所で動く AI は、こちらで決めたことをあちらが知りません。<br>
@@ -31,7 +32,7 @@
 - [使いはじめる](#get-started)
 - [安心して使える理由](#safety)
 - [向いていないケース](#not-for-you)
-- [いまできていること、できていないこと](#status)
+- [プロジェクトの状況](#status)
 - [もっと詳しく](#docs)
 - [Family OS の一員です](#family-os)
 - [謝辞](#acknowledgments)
@@ -236,7 +237,14 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 
 <a id="status"></a>
 
-## いまできていること、できていないこと
+## プロジェクトの状況
+
+[![Full test suite](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml/badge.svg)](https://github.com/caty-ai/family-memory-architecture/actions/workflows/full-suite.yml)
+
+- **CI**: 全テストスイートを、push・pull request のたびに Python 3.9 / 3.14 で実行し、テスト件数の完全一致もゲートで確認します。ローカルでは `make test` で実行できます（全テストスイートと公開ゲートを実行し、スイートのみを直接実行する場合は `python3 scripts/tests/run_tests.py` を使用します）。
+- **検証済み環境**: CI マトリクスの OS は `ubuntu-latest`（Python 3.9 / 3.14）です。macOS は CI マトリクス外の開発ホストとして使用しています。孤児プロセスを回収する init がないコンテナでは、設計どおりテスト1件が自動的にスキップされます（[issue #31](https://github.com/caty-ai/family-memory-architecture/issues/31)）。
+- **成熟度**: `reference` — MIT ライセンスで公開済みです。1台〜数台への導入は現在可能ですが、複数ホストへの配布はまだ進行中です（[配布前チェック](docs/pre-distribution-rc.md)、DRAFT）。
+- **既知の制約**: 複数ホストへの配布・復元リハーサル・連続稼働の観測は、まだ証拠で裏付けられていません（下表を参照）。
 
 | 状態 | 何が | 根拠 |
 |---|---|---|
@@ -245,8 +253,6 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 実装済み | 許可リストに載った索引だけへの投入 | `scripts/tests/test_meili_ingest.py` |
 | 実装済み | 故障の見張り（停滞・失敗・停止の区別） | `scripts/tests/test_jobs_framework.py` |
 | 途中 | 複数ホストへの配布・復元リハーサル・連続稼働の観測 | [配布前チェック](docs/pre-distribution-rc.md)（DRAFT） |
-
-テストは `python3 scripts/tests/run_tests.py` で一括実行できます（`test_write_guard.py` と `test_injection_lint.py` の2本は集計対象外なので個別に実行します）。2026-08-05 時点の一括実行の結果は passed=358 / failed=0 / errors=0 でした。
 
 > **メモ:** 「途中」は仕上げの作業が進行中という意味で、上の実装済み機能が使えないという意味ではありません。1台〜数台での導入は今日できます。複数ホストへの本格配布・復元リハーサル・実際の鍵での連続運用は、証拠が揃った時点で「実装済み」に上がります。その進み具合は上のリンク先で管理しています。
 
@@ -296,7 +302,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 縦軸・基盤 | [Caty Agent Harness](https://github.com/caty-ai/caty-agent-harness) | AIエージェントのタスク基盤 — 試行・リトライ・チェックポイント・完了判定 | 公開・MIT |
 | 縦軸 | [context-kit](https://github.com/caty-ai/context-kit) | エージェント1体分のコンテキスト衛生キット — 大出力の退避・委譲ブリーフ検査・安全フック・記憶検索 | 公開・MIT |
 | 縦軸 | [Persona Engine](https://github.com/caty-ai/persona-engine) | エージェントに人格を与える — 人格レイヤーと感情のグラデーション | 公開・MIT |
-| 縦軸 | **Persona Growth Loop** | 人格そのものを育てる — 最小・冪等な提案づくり | 公開準備中 |
+| 縦軸 | [Persona Growth Loop](https://github.com/caty-ai/persona-growth-loop) | 人格そのものを育てる — 最小・冪等な提案づくり | 公開・MIT |
 | 縦軸 | [X Collector](https://github.com/caty-ai/x-collector) | Xやウェブの素材を1日1回のダイジェストに — 人にもエージェントにも | 公開・MIT |
 | 縦軸 | [Self Growth Loop](https://github.com/caty-ai/self-growth-loop) | エージェントが自分の能力を育てるループ — 提案・ガバナンス・採用記録 | 公開・MIT |
 | 横軸・基盤 | **Family Memory Architecture** | 記憶バス — 家族が知っていることを共有する層 | 公開・MIT |

@@ -1337,7 +1337,9 @@ if __name__ == "__main__":
     import test_openclaw_capture
     import test_recall
     import test_secret_scan
+    import test_suite_census
     import test_vault_lint
+    import test_write_guard
 
     suite = unittest.TestSuite(
         [
@@ -1357,7 +1359,9 @@ if __name__ == "__main__":
             unittest.defaultTestLoader.loadTestsFromModule(test_openclaw_capture),
             unittest.defaultTestLoader.loadTestsFromModule(test_recall),
             unittest.defaultTestLoader.loadTestsFromModule(test_secret_scan),
+            unittest.defaultTestLoader.loadTestsFromModule(test_suite_census),
             unittest.defaultTestLoader.loadTestsFromModule(test_vault_lint),
+            unittest.defaultTestLoader.loadTestsFromModule(test_write_guard),
         ]
     )
     runner = unittest.TextTestRunner(verbosity=2)
