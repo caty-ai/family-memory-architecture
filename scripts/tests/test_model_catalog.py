@@ -6,6 +6,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -81,6 +82,12 @@ class ModelCatalogTests(unittest.TestCase):
     def adopt_current_catalog(self):
         state = json.loads(self.member_a.read_text(encoding="utf-8"))
         state["catalog_digest_adopted"] = hashlib.sha256(self.catalog.read_bytes()).hexdigest()
+        self.member_a.write_text(json.dumps(state), encoding="utf-8")
+
+    def member_state(self):
+        return json.loads(self.member_a.read_text(encoding="utf-8"))
+
+    def write_member_state(self, state):
         self.member_a.write_text(json.dumps(state), encoding="utf-8")
 
     def set_catalog_window(self, catalog_date, effective_date):
@@ -348,6 +355,16 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(module.ROW_REQUIRED, set(model_schema["required"]))
         self.assertEqual(module.LINEAGE_KEYS, set(model_schema["properties"]["lineage"]["properties"]))
 
+        expected_member = module.expected_member_schema()
+        actual_member = json.loads(self.member_schema.read_text(encoding="utf-8"))
+        self.assertEqual(actual_member, expected_member)
+        self.assertEqual(module.MEMBER_KEYS, set(expected_member["properties"]))
+        self.assertEqual(module.MEMBER_KEYS, set(expected_member["required"]))
+        self.assertEqual(
+            expected_member["properties"]["referenced_ids"]["items"],
+            expected["definitions"]["nonEmptyString"],
+        )
+
     def test_baseline_is_fail_closed_when_missing_or_invalid(self):
         missing = self.root / "missing.yaml"
         self.assert_fails_with("cannot read baseline catalog", self.run_check("--baseline", missing))
@@ -392,6 +409,149 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertIn("additional property 'availability' is not allowed", result.stderr)
         self.assertIn("must be a lowercase SHA-256 digest", result.stderr)
 
+    def test_member_state_missing_referenced_ids_fails(self):
+        state = self.member_state()
+        del state["referenced_ids"]
+        self.write_member_state(state)
+        self.assert_fails_with("missing required property 'referenced_ids'")
+
+    def test_member_state_referenced_ids_must_be_sorted(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-e-model-1", "vendor-a-model-1"]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("must be sorted in bytewise/codepoint ascending order", result)
+        self.assertIn("LC_ALL=C; case-sensitive", result.stderr)
+        self.assertIn("regenerate it from the member's local seat-configuration file", result.stderr)
+
+    def test_documented_generator_produces_accepted_codepoint_order(self):
+        upper_id = "Vendor-e-model-1"
+        self.write_catalog(self.catalog_text().replace("id: vendor-e-model-1", f"id: {upper_id}", 1))
+        policy = self.policy.read_text(encoding="utf-8")
+        match = re.search(r"```sh\n  (LC_ALL=C python3 -c .+)\n  ```", policy)
+        self.assertIsNotNone(match, "documented referenced_ids generator is missing")
+        seat_config = self.root / "member-a-seat-config.json"
+        seat_config.write_text(
+            json.dumps(
+                {
+                    "seats": [
+                        {"model_id": "vendor-c-model-2"},
+                        {"model_id": "vendor-a-model-1"},
+                        {"model_id": upper_id},
+                        {"model_id": "vendor-a-model-1"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = dict(os.environ, SEAT_CONFIG=str(seat_config))
+        generated = subprocess.run(
+            match.group(1),
+            shell=True,
+            executable="/bin/sh",
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        self.assertEqual(
+            json.loads(generated.stdout),
+            [upper_id, "vendor-a-model-1", "vendor-c-model-2"],
+        )
+        state = self.member_state()
+        state["referenced_ids"] = json.loads(generated.stdout)
+        self.write_member_state(state)
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_member_state_referenced_ids_reject_duplicates(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-a-model-1", "vendor-a-model-1"]
+        self.write_member_state(state)
+        self.assert_fails_with("duplicate model id 'vendor-a-model-1' is not allowed")
+
+    def test_member_state_referenced_ids_reject_empty_list(self):
+        state = self.member_state()
+        state["referenced_ids"] = []
+        self.write_member_state(state)
+        self.assert_fails_with("must contain at least one model id")
+
+    def test_member_state_referenced_ids_must_be_a_list(self):
+        state = self.member_state()
+        state["referenced_ids"] = "vendor-a-model-1"
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids for member 'member-a': must be an array")
+
+    def test_member_state_referenced_ids_reject_non_string_element(self):
+        state = self.member_state()
+        state["referenced_ids"] = [7, "vendor-a-model-1"]
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+
+    def test_member_state_referenced_ids_reject_malformed_id(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["   "]
+        self.write_member_state(state)
+        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+
+    def test_member_state_referenced_id_absent_from_catalog_fails_union(self):
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
+        self.assertIn("member-a", result.stderr)
+        self.assertIn(absent_id, result.stderr)
+
+    def test_member_union_checks_absent_id_after_index_zero(self):
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-a-model-1", absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
+        self.assertIn(absent_id, result.stderr)
+
+    def test_member_union_uses_ids_from_live_catalog_models(self):
+        old_id = "vendor-a-model-1"
+        new_id = "vendor-a-model-renamed"
+        self.write_catalog(
+            self.catalog_text().replace(f"  - id: {old_id}", f"  - id: {new_id}", 1)
+        )
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
+        self.assertIn("member-a", result.stderr)
+        self.assertIn(old_id, result.stderr)
+
+    def test_empty_catalog_cannot_vacuously_pass_member_union(self):
+        text = self.catalog_text()
+        self.write_catalog(text[: text.index("  - id: ")])
+        result = self.run_check()
+        self.assert_fails_with("must contain at least one row", result)
+        self.assertIn("cannot validate member referenced_ids", result.stderr)
+        self.assertIn("empty or invalid catalog model id set", result.stderr)
+
+    def test_member_reference_to_retired_catalog_row_is_notice(self):
+        text = self.catalog_text()
+        row_start = text.index("  - id: vendor-a-model-1")
+        row_end = text.index("  - id: vendor-b-model-1")
+        row = text[row_start:row_end]
+        row = row.replace("status: current", "status: retired", 1)
+        row = row.replace("quorum_eligible: true", "quorum_eligible: false", 1)
+        self.write_catalog(text[:row_start] + row + text[row_end:])
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "NOTICE: member 'member-a' references retired model id 'vendor-a-model-1'",
+            result.stderr,
+        )
+
     def test_member_state_malformed_json_fails_closed(self):
         self.member_a.write_text('{"member":', encoding="utf-8")
         self.assert_fails_with("cannot parse member-state record")
@@ -410,14 +570,38 @@ class ModelCatalogTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_absent_reference_is_notice_for_lagging_digest_within_window(self):
+        today = dt.date.today()
+        self.set_catalog_window(today.isoformat(), today.isoformat())
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["catalog_digest_adopted"] = "0" * 64
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"NOTICE: member-state member-a.json: member 'member-a' references model id "
+            f"'{absent_id}' that is absent from the catalog "
+            f"(within adoption window until {today.isoformat()})",
+            result.stderr,
+        )
+        self.assertIn("NOTICE: member-a lags current digest", result.stderr)
+        self.assertNotIn("ERROR:", result.stderr)
+
     def test_stale_member_digest_is_error_after_adoption_window(self):
         today = dt.date.today()
         self.set_catalog_window(
             (today - dt.timedelta(days=2)).isoformat(),
             (today - dt.timedelta(days=1)).isoformat(),
         )
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
         result = self.run_check()
         self.assert_fails_with("does not match existing catalog digest", result)
+        self.assertIn(f"model id '{absent_id}' that is absent from the catalog", result.stderr)
         self.assertNotIn("NOTICE:", result.stderr)
 
     def test_malformed_member_digest_is_error_even_within_window(self):

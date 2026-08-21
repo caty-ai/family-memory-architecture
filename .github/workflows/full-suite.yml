@@ -50,7 +50,7 @@ jobs:
         run: |
           set -o pipefail
           python3 -B scripts/tests/run_tests.py 2>&1 | tee full-suite.log
-      - name: Require all 469 tests
+      - name: Require all 483 tests
         shell: bash
         run: |
           # Exact-count gate: a dropped test module, a failure, or an unexpected
@@ -58,7 +58,7 @@ jobs:
           # here (both the string and the step name above).
           # tail-anchored so a test that happens to print the success line
           # cannot mask count drift elsewhere in the log.
-          tail -n 5 full-suite.log | grep -Fx 'Final summary: passed=469 failed=0 errors=0 skipped=0 total=469'
+          tail -n 5 full-suite.log | grep -Fx 'Final summary: passed=483 failed=0 errors=0 skipped=0 total=483'
 
   # Stable-named summary gate for use as a required status check. The matrix
   # leg names embed patch versions ("Python 3.9.25"), so requiring them
