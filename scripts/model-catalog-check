@@ -748,6 +748,15 @@ def validate_member_state(
             errors.append(f"{label}.{key}: must be a lowercase SHA-256 digest")
     member = state.get("member")
     member_name = member if isinstance(member, str) and member.strip() else path.stem
+    adopted = state.get("catalog_digest_adopted")
+    lags_current_digest = (
+        isinstance(adopted, str)
+        and HEX_DIGEST_RE.fullmatch(adopted) is not None
+        and adopted != catalog_digest
+    )
+    within_adoption_window = (
+        revision_effective_after is not None and today <= revision_effective_after
+    )
     referenced_ids = state.get("referenced_ids")
     if not isinstance(referenced_ids, list):
         errors.append(f"{label}.referenced_ids for member {member_name!r}: must be an array")
@@ -780,26 +789,33 @@ def validate_member_state(
             else:
                 seen_referenced_ids.add(model_id)
             if model_id not in catalog_models:
-                errors.append(
+                message = (
                     f"{label}: member {member_name!r} references model id {model_id!r} "
                     "that is absent from the catalog"
                 )
+                if lags_current_digest and within_adoption_window:
+                    notices.append(
+                        f"NOTICE: {message} (within adoption window until "
+                        f"{revision_effective_after.isoformat()})"
+                    )
+                else:
+                    errors.append(message)
             elif catalog_models[model_id] == "retired":
                 notices.append(
                     f"NOTICE: member {member_name!r} references retired model id {model_id!r}"
                 )
         if all_strings and referenced_ids != sorted(referenced_ids):
             errors.append(
-                f"{label}.referenced_ids for member {member_name!r}: must be sorted ascending; "
+                f"{label}.referenced_ids for member {member_name!r}: must be sorted in "
+                "bytewise/codepoint ascending order (LC_ALL=C; case-sensitive); "
                 "regenerate it from the member's local seat-configuration file"
             )
     date_errors = []
     if "verified_at" in state:
         parse_date(date_errors, f"{label}.verified_at", state["verified_at"])
         errors.extend(date_errors)
-    adopted = state.get("catalog_digest_adopted")
-    if isinstance(adopted, str) and HEX_DIGEST_RE.fullmatch(adopted) and adopted != catalog_digest:
-        if revision_effective_after is not None and today <= revision_effective_after:
+    if lags_current_digest:
+        if within_adoption_window:
             notices.append(
                 f"NOTICE: {member_name} lags current digest "
                 f"(within adoption window until {revision_effective_after.isoformat()})"

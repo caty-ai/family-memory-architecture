@@ -6,6 +6,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -419,8 +420,52 @@ class ModelCatalogTests(unittest.TestCase):
         state["referenced_ids"] = ["vendor-e-model-1", "vendor-a-model-1"]
         self.write_member_state(state)
         result = self.run_check()
-        self.assert_fails_with("must be sorted ascending", result)
+        self.assert_fails_with("must be sorted in bytewise/codepoint ascending order", result)
+        self.assertIn("LC_ALL=C; case-sensitive", result.stderr)
         self.assertIn("regenerate it from the member's local seat-configuration file", result.stderr)
+
+    def test_documented_generator_produces_accepted_codepoint_order(self):
+        upper_id = "Vendor-e-model-1"
+        self.write_catalog(self.catalog_text().replace("id: vendor-e-model-1", f"id: {upper_id}", 1))
+        policy = self.policy.read_text(encoding="utf-8")
+        match = re.search(r"```sh\n  (LC_ALL=C python3 -c .+)\n  ```", policy)
+        self.assertIsNotNone(match, "documented referenced_ids generator is missing")
+        seat_config = self.root / "member-a-seat-config.json"
+        seat_config.write_text(
+            json.dumps(
+                {
+                    "seats": [
+                        {"model_id": "vendor-c-model-2"},
+                        {"model_id": "vendor-a-model-1"},
+                        {"model_id": upper_id},
+                        {"model_id": "vendor-a-model-1"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = dict(os.environ, SEAT_CONFIG=str(seat_config))
+        generated = subprocess.run(
+            match.group(1),
+            shell=True,
+            executable="/bin/sh",
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        self.assertEqual(
+            json.loads(generated.stdout),
+            [upper_id, "vendor-a-model-1", "vendor-c-model-2"],
+        )
+        state = self.member_state()
+        state["referenced_ids"] = json.loads(generated.stdout)
+        self.write_member_state(state)
+        self.adopt_current_catalog()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_member_state_referenced_ids_reject_duplicates(self):
         state = self.member_state()
@@ -460,6 +505,15 @@ class ModelCatalogTests(unittest.TestCase):
         result = self.run_check()
         self.assert_fails_with("absent from the catalog", result)
         self.assertIn("member-a", result.stderr)
+        self.assertIn(absent_id, result.stderr)
+
+    def test_member_union_checks_absent_id_after_index_zero(self):
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-a-model-1", absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("absent from the catalog", result)
         self.assertIn(absent_id, result.stderr)
 
     def test_member_union_uses_ids_from_live_catalog_models(self):
@@ -516,14 +570,38 @@ class ModelCatalogTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_absent_reference_is_notice_for_lagging_digest_within_window(self):
+        today = dt.date.today()
+        self.set_catalog_window(today.isoformat(), today.isoformat())
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["catalog_digest_adopted"] = "0" * 64
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"NOTICE: member-state member-a.json: member 'member-a' references model id "
+            f"'{absent_id}' that is absent from the catalog "
+            f"(within adoption window until {today.isoformat()})",
+            result.stderr,
+        )
+        self.assertIn("NOTICE: member-a lags current digest", result.stderr)
+        self.assertNotIn("ERROR:", result.stderr)
+
     def test_stale_member_digest_is_error_after_adoption_window(self):
         today = dt.date.today()
         self.set_catalog_window(
             (today - dt.timedelta(days=2)).isoformat(),
             (today - dt.timedelta(days=1)).isoformat(),
         )
+        absent_id = "vendor-z-model-404"
+        state = self.member_state()
+        state["referenced_ids"] = [absent_id]
+        self.write_member_state(state)
         result = self.run_check()
         self.assert_fails_with("does not match existing catalog digest", result)
+        self.assertIn(f"model id '{absent_id}' that is absent from the catalog", result.stderr)
         self.assertNotIn("NOTICE:", result.stderr)
 
     def test_malformed_member_digest_is_error_even_within_window(self):
