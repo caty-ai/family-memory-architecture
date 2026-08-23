@@ -24,6 +24,14 @@ We fix that with structure: one short shared page that everyone reads, with deci
 
 ---
 
+<div align="center">
+
+![28-second terminal demo of the shared-memory cycle. One agent records a decision as an immutable inbox event, the generator folds the inbox into one short shared page, and every agent reads that checksum-verified page at session start.](assets/readme/demo.gif)
+
+</div>
+
+---
+
 ## Table of contents
 
 - [Sound familiar?](#problems)
