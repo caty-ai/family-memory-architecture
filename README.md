@@ -21,6 +21,9 @@ We fix that with structure: one short shared page that everyone reads, with deci
 🔧 [Design document](docs/DESIGN.md) ｜ 📘 [Getting started](docs/getting-started.md)
 
 </div>
+<!-- repo-state:begin (generated; do not edit) -->
+<p align="center"><sub>generation: <code>67efef8</code> (2026-08-25T15:09:31Z) · verify: <a href="https://api.github.com/repos/caty-ai/family-memory-architecture/commits/feat/repo-state-caller-56">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<!-- repo-state:end -->
 
 ---
 
