@@ -21,6 +21,9 @@
 🔧 [设计文档](docs/DESIGN.md) ｜ 📘 [新手指南](docs/getting-started.md)
 
 </div>
+<!-- repo-state:begin (generated; do not edit) -->
+<p align="center"><sub>generation: <code>67efef8</code> (2026-08-25T15:09:31Z) · verify: <a href="https://api.github.com/repos/caty-ai/family-memory-architecture/commits/feat/repo-state-caller-56">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<!-- repo-state:end -->
 
 ---
 
