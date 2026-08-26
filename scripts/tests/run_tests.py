@@ -1335,6 +1335,7 @@ if __name__ == "__main__":
     import test_lib_atomic
     import test_meili_ingest
     import test_openclaw_capture
+    import test_overlap_lint
     import test_recall
     import test_secret_scan
     import test_suite_census
@@ -1357,6 +1358,7 @@ if __name__ == "__main__":
             unittest.defaultTestLoader.loadTestsFromModule(test_meili_ingest),
             unittest.defaultTestLoader.loadTestsFromModule(test_model_catalog),
             unittest.defaultTestLoader.loadTestsFromModule(test_openclaw_capture),
+            unittest.defaultTestLoader.loadTestsFromModule(test_overlap_lint),
             unittest.defaultTestLoader.loadTestsFromModule(test_recall),
             unittest.defaultTestLoader.loadTestsFromModule(test_secret_scan),
             unittest.defaultTestLoader.loadTestsFromModule(test_suite_census),

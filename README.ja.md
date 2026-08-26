@@ -104,7 +104,7 @@ flowchart LR
 | 観点 | 対応 |
 |---|---|
 | ランタイム | ✅ Python 3.14（3.14.3 で実測）／ ⚠️ 3.13 以前は未検証（3.9 は一部テスト不合格を確認） |
-| OS | ✅ macOS（テスト一式を実測）／ ✅ Linux（サーバー側スクリプトを毎日実運用） |
+| OS | ✅ macOS（テスト一式を実測）／ ✅ Linux（サーバー側スクリプトを毎日実運用）／ ✅ Windows は WSL2 経由（vault は ext4 に置く・`/mnt/c` は不可 — [導入ガイド](docs/getting-started.md)参照） |
 | 依存パッケージ | ✅ なし（Python 標準ライブラリのみ） |
 | 実運用が確認できている AI エージェント環境 | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | 対応検証を予定している環境 | ⚠️ Kimi Code ／ ⚠️ Codex |

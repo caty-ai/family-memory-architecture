@@ -104,7 +104,7 @@ The minimal setup needs only Python 3 and an empty folder. Everything else is an
 | Aspect | Support |
 |---|---|
 | Runtime | ✅ Python 3.14 (verified with 3.14.3) ／ ⚠️ 3.13 and below unverified (3.9 measured with one test failure) |
-| OS | ✅ macOS (test suite verified) ／ ✅ Linux (server-side scripts in daily production use) |
+| OS | ✅ macOS (test suite verified) ／ ✅ Linux (server-side scripts in daily production use) ／ ✅ Windows via WSL2 (keep the vault on ext4, not `/mnt/c` — see [getting-started](docs/getting-started.md)) |
 | Dependencies | ✅ None (Python standard library only) |
 | Agent environments verified in real use | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | Environments planned for verification | ⚠️ Kimi Code ／ ⚠️ Codex |

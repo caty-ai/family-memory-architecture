@@ -105,6 +105,52 @@ Adjust absolute paths for the deployed checkout. The wrapper records the
 `backup-dashboard` heartbeat; a failed monitored backup job does not make a
 successful dashboard-generation run fail.
 
+## Linux Example (systemd user timer or cron)
+
+launchd is macOS-only. On Linux (including WSL2), the same 30-minute cadence is a
+systemd user timer:
+
+```ini
+# ~/.config/systemd/user/fma-backup-dashboard.service
+[Unit]
+Description=fma backup dashboard generation
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'scp -o BatchMode=yes -o ConnectTimeout=15 "you@192.0.2.20:.openclaw/state/heartbeats/*.json" %h/.claude/state/heartbeats/ || true; exec %h/family-memory-architecture/scripts/run-with-heartbeat backup-dashboard -- %h/family-memory-architecture/scripts/backup-dashboard'
+```
+
+```ini
+# ~/.config/systemd/user/fma-backup-dashboard.timer
+[Unit]
+Description=fma backup dashboard every 30 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable with `systemctl --user enable --now fma-backup-dashboard.timer`. `%h`
+expands to the home directory; adjust paths for the deployed checkout as in the
+launchd example. User timers run only while a user session exists — on a
+headless machine (or WSL2 with no open terminal), also run
+`loginctl enable-linger <user>` so the timer survives logout. A cron equivalent works too (keep the best-effort scp pull —
+dropping it reintroduces the false-STALE problem described above, fma #109):
+
+```cron
+*/30 * * * * flock -n /tmp/fma-backup-dashboard.lock /bin/bash -c 'scp -o BatchMode=yes -o ConnectTimeout=15 "you@192.0.2.20:.openclaw/state/heartbeats/*.json" ~/.claude/state/heartbeats/ || true; exec ~/family-memory-architecture/scripts/run-with-heartbeat backup-dashboard -- ~/family-memory-architecture/scripts/backup-dashboard'
+```
+
+On WSL2, neither cron nor systemd user services run unless enabled: turn on
+systemd via `/etc/wsl.conf` (`[boot]` `systemd=true`) or start the cron service
+yourself — see the WSL2 caveat in
+[getting-started.md](getting-started.md). Keep the vault, heartbeats, and env
+files on ext4, never under `/mnt/c` (the `0600` fail-closed checks and `flock`
+locks do not work on DrvFs).
+
 ## Tailscale Serve
 
 Measured 2026-07-17 on the macOS App Store Tailscale build: `--set-path` with a

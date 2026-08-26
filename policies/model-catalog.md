@@ -30,7 +30,7 @@
   ```sh
   LC_ALL=C python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(json.dumps(sorted({seat["model_id"] for seat in d["seats"]}), ensure_ascii=False, separators=(",", ":")))' "$SEAT_CONFIG"
   ```
-- 公開サンプル `member-a` の `config_digest` は `printf 'member-a-sample-config' | shasum -a 256` で導出する。
+- 公開サンプル `member-a` の `config_digest` は `printf 'member-a-sample-config' | sha256sum` で導出する。
 - 決定記録の catalog_digest が `revision_effective_after` を超えて古い場合は「遅延」でなく**非適合**として報告（報告主体は checker・P1 では上記 fail-closed が先に止める）。
 
 ## merge 権限（オーナー専決 + CI ゲート + front door + fast path）

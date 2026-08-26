@@ -13,6 +13,7 @@
 - **Secret-bearing backups stay local**: a backup that may contain a legacy secret is mode `0600`, host-local, outside synced/shared paths, never uploaded, and retained only through the rollback window. After revocation, remove it under operator supervision and retain only a sanitized deletion timestamp/digest record; do not claim physical secure erasure on copy-on-write storage.
 - **Rollback owner** for every step is the operator unless a step explicitly names a different owner. Agents assist; they do not own rollback.
 - **Precondition for the whole runbook**: pre-distribution RC readiness per [docs/pre-distribution-rc.md](pre-distribution-rc.md) is declared by Agent A with complete evidence. This runbook does not start before that.
+- **Platform note**: the concrete templates below are macOS-shaped (LaunchAgent plists, Keychain). On Linux (including WSL2) the same gate applies unchanged in structure: substitute systemd user units or crontab entries for LaunchAgents (`<LAUNCHAGENT_DIR>` → `~/.config/systemd/user/` or the crontab), and host-local `0600` env files for Keychain items. The evidence, rollback, and Operator GO requirements are identical.
 
 ## 1. Credentials: #78 / #47 issue, rotate, revoke
 

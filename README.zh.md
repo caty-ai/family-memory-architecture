@@ -104,7 +104,7 @@ flowchart LR
 | 方面 | 支持情况 |
 |---|---|
 | 运行环境 | ✅ Python 3.14（已用 3.14.3 验证）／ ⚠️ 3.13 及以下未验证（3.9 实测有一个测试不通过） |
-| 操作系统 | ✅ macOS（已通过完整测试套件验证）／ ✅ Linux（服务器端脚本每天在生产环境运行） |
+| 操作系统 | ✅ macOS（已通过完整测试套件验证）／ ✅ Linux（服务器端脚本每天在生产环境运行）／ ✅ Windows 通过 WSL2（vault 必须放在 ext4 上，不能放在 `/mnt/c` — 参见[导入指南](docs/getting-started.md)） |
 | 依赖 | ✅ 无（仅使用 Python 标准库） |
 | 已在实际运行中验证的 AI Agent 环境 | ✅ Claude Code ／ ✅ Hermes Agent ／ ✅ OpenClaw |
 | 计划进行验证的环境 | ⚠️ Kimi Code ／ ⚠️ Codex |

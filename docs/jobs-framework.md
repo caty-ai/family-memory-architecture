@@ -85,7 +85,7 @@ For `period_hours: null` on-demand jobs, the watchdog never alerts only because 
 Alert routes:
 
 - `stderr`: represented by the normal human output or `--json` output.
-- `notify`: `--notify` sends a macOS notification when alerts exist.
+- `notify`: `--notify` sends a macOS notification when alerts exist. On Linux (including WSL2) the macOS notification half (osascript) is a deliberate no-op — no crash, no output — but the same `--notify` flag also sends the watchdog's best-effort Telegram alert on every platform. That Telegram route is the non-macOS substitute: put `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `~/.config/fma/telegram.env` (mode `0600`); an absent file means Telegram is deliberately unconfigured on that host.
 - `inbox`: `--inbox-post` posts a caution event through `scripts/hot-inbox-post`.
 
 Exit codes:
@@ -162,7 +162,7 @@ raw bytes into quarantine or logs.
 
 ## Per-Host Operation
 
-`laptop` jobs are intended to run under launchd. Actual plist deployment wiring is out of scope for this issue and should land separately.
+`laptop` jobs are intended to run under launchd on macOS; on a Linux laptop (including WSL2) the equivalent is a systemd user timer or a cron entry (see the Linux example in [backup-dashboard-usage.md](backup-dashboard-usage.md) and the WSL2 enablement caveat in [getting-started.md](getting-started.md)). Actual deployment wiring is out of scope for this issue and should land separately.
 
 `server` jobs are intended to run under cron. Actual crontab deployment wiring is also out of scope for this issue.
 
