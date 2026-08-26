@@ -27,7 +27,7 @@ Local OpenClaw capture plugin for the Issue #46 pilot. It subscribes to the disp
    ```
 
 3. Reload the OpenClaw gateway.
-4. Run `scripts/capture-shipper` out-of-process on a launchd cadence with a separate `0600` env file containing the Supermemory key.
+4. Run `scripts/capture-shipper` out-of-process on a launchd cadence (macOS) — or a systemd user timer / cron entry on Linux — with a separate `0600` env file containing the Supermemory key. On WSL2/Linux keep that env file on ext4, never under `/mnt/c`, or the fail-closed `0600` check stops the shipper.
 
 The plugin intentionally uses only `message_received` and `message_sent`. Per the Issue #46 claude-cli verification, those hooks fire at the provider-independent dispatch/deliver layer, so this capture path works under claude-cli. Tool-layer hooks do not fire under claude-cli and are not used here.
 

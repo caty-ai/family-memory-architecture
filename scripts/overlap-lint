@@ -17,7 +17,11 @@ from pathlib import Path
 
 
 DEFAULT_CLAUDE_MD = "~/.claude/CLAUDE.md"
-DEFAULT_MEMORY_MD = "~/.claude/projects/-Users-you-workspace/memory/MEMORY.md"
+
+
+def default_memory_md():
+    encoded_cwd = re.sub(r"[^A-Za-z0-9-]", "-", str(Path.cwd()))
+    return f"~/.claude/projects/{encoded_cwd}/memory/MEMORY.md"
 
 
 @dataclass(frozen=True)
@@ -196,7 +200,15 @@ def build_report(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Detect duplicate facts across fixed injection sources.")
     parser.add_argument("--claude-md", default=DEFAULT_CLAUDE_MD, help="path to CLAUDE.md")
-    parser.add_argument("--memory-md", default=DEFAULT_MEMORY_MD, help="path to MEMORY.md")
+    parser.add_argument(
+        "--memory-md",
+        default=default_memory_md(),
+        help=(
+            "path to MEMORY.md; default derives from the current working directory's "
+            "Claude Code project encoding. Pass --memory-md explicitly when running "
+            "outside the project root"
+        ),
+    )
     parser.add_argument("--supermemory-export", help="optional Supermemory export path")
     parser.add_argument("--min-len", type=int, default=24, help="minimum normalized unit length")
     parser.add_argument("--fuzzy", action="store_true", help="also run slower fuzzy comparisons")

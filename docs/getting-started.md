@@ -44,7 +44,7 @@ README の[クイックスタート](../README.ja.md#get-started)の詳細版で
 
 | もの | 用途 | 補足 |
 |---|---|---|
-| Meilisearch | ローカル全文検索エンジン | `brew services` 等で常駐。議事録・作業ログを固有名詞で瞬時に検索する層 |
+| Meilisearch | ローカル全文検索エンジン | macOS は `brew services`、Linux は systemd サービス等で常駐。議事録・作業ログを固有名詞で瞬時に検索する層 |
 | ripgrep (`rg`) | grep 層の高速化 | なければ `grep` に自動フォールバックします |
 
 ### 任意（なくても動く）
@@ -68,6 +68,8 @@ mkdir -p ~/family-vault/00_index/hot-inbox
 ```
 
 これを Syncthing 等で参加マシン全部に同期します。`00_index/` がホワイトボードと投書箱の置き場です。
+
+> **WSL2 / Linux の注意（vault と env ファイルは ext4 に置く）**: vault と `0600` の env ファイルは必ず Linux ファイルシステム側（ext4、例: `~/family-vault`）に置き、`/mnt/c` 配下（Windows ドライブ）には置かないでください。`/mnt/c`（DrvFs）では `chmod` が効かないため、`family-hot-generate`・`capture-shipper`・env ファイル読み込みの `0600` セルフチェックが fail-closed（exit 2）で停止します。また `flock` による二重起動防止（`hot-inbox-reader` など）も DrvFs 上では信頼できません。Windows 側の Obsidian から vault を見たい場合も、vault は ext4 に置いたまま `\\wsl$\<ディストリ名>\home\...` 経由で開いてください。既定の `~/family-vault` はそのままで安全です。
 
 ### Step 2 — このリポジトリを clone してスクリプトを確認する
 
@@ -96,7 +98,9 @@ python3 scripts/tests/run_tests.py   # まずテストが全部通ることを�
 
 15分ごとに投書箱を取り込んでホワイトボードを再生成します。`flock` で二重起動を防ぎます。
 
-> **注**: 素の macOS に `flock` は入っていません。`brew install util-linux`（`flock` は `util-linux` に含まれる）を入れるか、launchd での定期実行に置き換えてください。いずれの場合も二重起動防止の仕組みは捨てないでください。
+> **注**: 素の macOS に `flock` は入っていません。`brew install util-linux`（`flock` は `util-linux` に含まれる）を入れるか、launchd での定期実行に置き換えてください。いずれの場合も二重起動防止の仕組みは捨てないでください。Linux / WSL2 には `flock` が最初から入っているため、この置き換えは不要でそのまま使えます。
+
+> **WSL2 の注意（cron は自動起動しない）**: WSL2 では cron デーモンは既定で自動起動しません。`/etc/wsl.conf` に `[boot]` `systemd=true` を書いて systemd を有効化する（cron も systemd timer も使えるようになります）か、Windows 側のスタートアップ等から `sudo service cron start` を流してください。cron が動いていないと、この Step の定期生成は一度も走りません。
 
 ### Step 4 — 各エージェントに「起動時に読む」を仕込む
 

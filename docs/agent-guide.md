@@ -49,6 +49,8 @@ mkdir -p ~/family-vault/00_index/hot-inbox
 
 That is the entire data layer: a folder of Markdown and JSON files. The vault is the canonical store; everything else in this guide is a convenience layer on top of it.
 
+On WSL2/Linux, keep the vault (and any `0600` env files) on the Linux filesystem (ext4, e.g. `~/family-vault`) — never under `/mnt/c`. DrvFs ignores `chmod`, so the fail-closed `0600` self-checks in `family-hot-generate` and `capture-shipper` stop hard (exit 2), and `flock` single-instance locks are unreliable there. If the human wants to browse from Windows Obsidian, keep the vault on ext4 and open it via `\\wsl$\<distro>\home\...`.
+
 ## Step 3 — wire session-start reading (show the human first)
 
 Participation in FMA means one thing: **read the shared page at session start, verified.** Append one marked block to the instruction file of the runtime you are running in right now — after showing it to the human:
