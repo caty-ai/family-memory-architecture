@@ -135,10 +135,13 @@ WantedBy=timers.target
 
 Enable with `systemctl --user enable --now fma-backup-dashboard.timer`. `%h`
 expands to the home directory; adjust paths for the deployed checkout as in the
-launchd example. A cron equivalent works too:
+launchd example. User timers run only while a user session exists — on a
+headless machine (or WSL2 with no open terminal), also run
+`loginctl enable-linger <user>` so the timer survives logout. A cron equivalent works too (keep the best-effort scp pull —
+dropping it reintroduces the false-STALE problem described above, fma #109):
 
 ```cron
-*/30 * * * * flock -n /tmp/fma-backup-dashboard.lock ~/family-memory-architecture/scripts/run-with-heartbeat backup-dashboard -- ~/family-memory-architecture/scripts/backup-dashboard
+*/30 * * * * flock -n /tmp/fma-backup-dashboard.lock /bin/bash -c 'scp -o BatchMode=yes -o ConnectTimeout=15 "you@192.0.2.20:.openclaw/state/heartbeats/*.json" ~/.claude/state/heartbeats/ || true; exec ~/family-memory-architecture/scripts/run-with-heartbeat backup-dashboard -- ~/family-memory-architecture/scripts/backup-dashboard'
 ```
 
 On WSL2, neither cron nor systemd user services run unless enabled: turn on

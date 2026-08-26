@@ -85,7 +85,7 @@ For `period_hours: null` on-demand jobs, the watchdog never alerts only because 
 Alert routes:
 
 - `stderr`: represented by the normal human output or `--json` output.
-- `notify`: `--notify` sends a macOS notification when alerts exist. On Linux (including WSL2) this route is a deliberate no-op — no crash, no output. The non-macOS substitute is the watchdog's Telegram alert: put `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `~/.config/fma/telegram.env` (mode `0600`); an absent file means Telegram is deliberately unconfigured on that host.
+- `notify`: `--notify` sends a macOS notification when alerts exist. On Linux (including WSL2) the macOS notification half (osascript) is a deliberate no-op — no crash, no output — but the same `--notify` flag also sends the watchdog's best-effort Telegram alert on every platform. That Telegram route is the non-macOS substitute: put `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `~/.config/fma/telegram.env` (mode `0600`); an absent file means Telegram is deliberately unconfigured on that host.
 - `inbox`: `--inbox-post` posts a caution event through `scripts/hot-inbox-post`.
 
 Exit codes:
