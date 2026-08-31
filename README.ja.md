@@ -284,7 +284,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 横断検索 `recall` の使い方 | [docs/recall-usage.md](docs/recall-usage.md) |
 | 検索索引への投入ルール | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | 故障の見張りの意味 | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| リポジトリ全体の構造とスクリプト26本の役割 | [docs/repository-map.md](docs/repository-map.md) |
+| リポジトリ全体の構造とスクリプト27本の役割 | [docs/repository-map.md](docs/repository-map.md) |
 | 開発に参加したい | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 不具合・脆弱性を見つけた | [SECURITY.md](SECURITY.md) |
 | クラウド記憶の配分ルール | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

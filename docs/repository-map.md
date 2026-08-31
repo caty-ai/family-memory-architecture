@@ -11,7 +11,7 @@ family-memory-architecture/
 ├── README.md            … 玄関（en/ja/zh/th の4言語）
 ├── INSTALL.md           … 導入の分岐板（AI に渡す / 手で入れる）
 ├── docs/                … 用途別ガイドと設計文書（このファイルもここ）
-├── scripts/             … 実働スクリプト26本＋テスト一式（Python 標準ライブラリのみ）
+├── scripts/             … 実働スクリプト27本＋テスト一式（Python 標準ライブラリのみ）
 ├── manifests/           … 「何が存在してよいか」の許可リスト（お手本サンプル）
 ├── policies/            … 運用ポリシー（クラウド記憶の配分・ジョブの畳み方・モデルカタログ運用）
 ├── extensions/          … ランタイム別の実験的プラグイン
@@ -20,9 +20,9 @@ family-memory-architecture/
 
 ---
 
-## scripts/ — 実働スクリプト26本
+## scripts/ — 実働スクリプト27本
 
-CLI 23本＋共通ライブラリ3本。すべて外部パッケージ不要で、Python 3 標準ライブラリのみを使います（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
+CLI 24本＋共通ライブラリ3本。すべて外部パッケージ不要で、Python 3 標準ライブラリのみを使います（`run-with-heartbeat` だけ bash）。役割は5グループに分かれます。
 
 ### 共有面（コア）
 
@@ -64,6 +64,7 @@ CLI 23本＋共通ライブラリ3本。すべて外部パッケージ不要で�
 | `injection-lint` | エージェント別注入 manifest のサイズ・鮮度検査 |
 | `content-lint` | 役割別指示ファイルの期限切れ事実・バイト上限検査 |
 | `personal-hot-lint` | 個人用 hot cache の検査 |
+| `check_publication_gate.py` | 公開ソースに非公開文脈・鮮度切れが混じっていないかを配布前に fail-closed で検査（公開ゲート・CI 用） |
 
 ### その他
 
