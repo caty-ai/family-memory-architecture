@@ -283,7 +283,7 @@ FMA_HEARTBEAT_DIR=./demo-vault/.heartbeats ./scripts/family-hot-generate --vault
 | 跨层搜索 `recall` 的用法 | [docs/recall-usage.md](docs/recall-usage.md) |
 | 向搜索索引投入数据的规则 | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | 故障监测的含义 | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| 仓库整体结构与 26 个脚本各自的作用 | [docs/repository-map.md](docs/repository-map.md) |
+| 仓库整体结构与 27 个脚本各自的作用 | [docs/repository-map.md](docs/repository-map.md) |
 | 想参与开发 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | 发现了缺陷或漏洞 | [SECURITY.md](SECURITY.md) |
 | 云端记忆的分配规则 | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |

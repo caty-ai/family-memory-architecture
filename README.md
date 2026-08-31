@@ -284,7 +284,7 @@ That is every fact you need for a decision. The depth lives below.
 | Using cross-layer search `recall` | [docs/recall-usage.md](docs/recall-usage.md) |
 | Rules for ingesting into the search index | [docs/meili-ingest-usage.md](docs/meili-ingest-usage.md) |
 | What the failure watch means | [docs/jobs-framework.md](docs/jobs-framework.md) |
-| Where everything lives — directories and all 26 scripts | [docs/repository-map.md](docs/repository-map.md) |
+| Where everything lives — directories and all 27 scripts | [docs/repository-map.md](docs/repository-map.md) |
 | Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Report a bug or vulnerability | [SECURITY.md](SECURITY.md) |
 | Allocation rules for cloud memory | [policies/supermemory-allocation.md](policies/supermemory-allocation.md) |
