@@ -196,6 +196,12 @@ def expected_member_schema() -> dict:
             "catalog_digest_adopted": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "config_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "referenced_ids": {
+                "$comment": (
+                    "Sortedness (bytewise/codepoint ascending, LC_ALL=C) and rejection of "
+                    "whitespace-only strings are enforced only by scripts/model-catalog-check; "
+                    "they cannot be expressed in JSON Schema, so a stock validator provides "
+                    "the loose view."
+                ),
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": True,
@@ -701,6 +707,7 @@ def validate_policy(path: Path) -> list[str]:
     return errors
 
 
+# Defense-in-depth: schema/semantic validation rejects these shapes too; tests cover each branch.
 def catalog_id_statuses(catalog: dict) -> dict[str, str] | None:
     """Return a validated ID-to-status map sourced only from catalog model rows."""
     models = catalog.get("models")
@@ -757,13 +764,17 @@ def validate_member_state(
     within_adoption_window = (
         revision_effective_after is not None and today <= revision_effective_after
     )
-    referenced_ids = state.get("referenced_ids")
-    if not isinstance(referenced_ids, list):
-        errors.append(f"{label}.referenced_ids for member {member_name!r}: must be an array")
+    if "referenced_ids" in state:
+        referenced_ids = state["referenced_ids"]
+        if not isinstance(referenced_ids, list):
+            errors.append(f"{label}: referenced_ids for member {member_name!r}: must be an array")
+            referenced_ids = None
     else:
+        referenced_ids = None
+    if isinstance(referenced_ids, list):
         if not referenced_ids:
             errors.append(
-                f"{label}.referenced_ids for member {member_name!r}: "
+                f"{label}: referenced_ids for member {member_name!r}: "
                 "must contain at least one model id"
             )
         seen_referenced_ids = set()
@@ -772,18 +783,18 @@ def validate_member_state(
             if not isinstance(model_id, str):
                 all_strings = False
                 errors.append(
-                    f"{label}.referenced_ids[{index}] for member {member_name!r}: "
+                    f"{label}: referenced_ids[{index}] for member {member_name!r}: "
                     "must be a non-empty string"
                 )
                 continue
             if not model_id.strip():
                 errors.append(
-                    f"{label}.referenced_ids[{index}] for member {member_name!r}: "
+                    f"{label}: referenced_ids[{index}] for member {member_name!r}: "
                     "must be a non-empty string"
                 )
             if model_id in seen_referenced_ids:
                 errors.append(
-                    f"{label}.referenced_ids for member {member_name!r}: "
+                    f"{label}: referenced_ids for member {member_name!r}: "
                     f"duplicate model id {model_id!r} is not allowed"
                 )
             else:
@@ -804,9 +815,14 @@ def validate_member_state(
                 notices.append(
                     f"NOTICE: member {member_name!r} references retired model id {model_id!r}"
                 )
+            elif catalog_models[model_id] == "trial":
+                notices.append(
+                    f"NOTICE: member {member_name!r} references trial model id {model_id!r} "
+                    "(trial rows are outside the draw and outside quorum)"
+                )
         if all_strings and referenced_ids != sorted(referenced_ids):
             errors.append(
-                f"{label}.referenced_ids for member {member_name!r}: must be sorted in "
+                f"{label}: referenced_ids for member {member_name!r}: must be sorted in "
                 "bytewise/codepoint ascending order (LC_ALL=C; case-sensitive); "
                 "regenerate it from the member's local seat-configuration file"
             )

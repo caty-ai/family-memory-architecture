@@ -113,6 +113,13 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertIn("ERROR:", result.stderr)
         self.assertIn(needle, result.stderr)
 
+    def load_checker_module(self, name):
+        loader = importlib.machinery.SourceFileLoader(name, str(CHECKER))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
     def test_happy_path(self):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -365,6 +372,44 @@ class ModelCatalogTests(unittest.TestCase):
             expected["definitions"]["nonEmptyString"],
         )
 
+    def test_catalog_id_statuses_rejects_non_dict_row(self):
+        module = self.load_checker_module("model_catalog_check_non_dict_row")
+        self.assertIsNone(module.catalog_id_statuses({"models": ["not-a-row"]}))
+
+    def test_catalog_id_statuses_rejects_unknown_status(self):
+        module = self.load_checker_module("model_catalog_check_unknown_status")
+        self.assertIsNone(
+            module.catalog_id_statuses({"models": [{"id": "model-a", "status": "paused"}]})
+        )
+
+    def test_catalog_id_statuses_rejects_duplicate_id(self):
+        module = self.load_checker_module("model_catalog_check_duplicate_id")
+        self.assertIsNone(
+            module.catalog_id_statuses(
+                {
+                    "models": [
+                        {"id": "model-a", "status": "current"},
+                        {"id": "model-a", "status": "retired"},
+                    ]
+                }
+            )
+        )
+
+    def test_catalog_id_statuses_returns_id_status_map(self):
+        module = self.load_checker_module("model_catalog_check_valid_statuses")
+        self.assertEqual(
+            module.catalog_id_statuses(
+                {
+                    "models": [
+                        {"id": "model-a", "status": "current"},
+                        {"id": "model-b", "status": "trial"},
+                        {"id": "model-c", "status": "retired"},
+                    ]
+                }
+            ),
+            {"model-a": "current", "model-b": "trial", "model-c": "retired"},
+        )
+
     def test_baseline_is_fail_closed_when_missing_or_invalid(self):
         missing = self.root / "missing.yaml"
         self.assert_fails_with("cannot read baseline catalog", self.run_check("--baseline", missing))
@@ -414,6 +459,14 @@ class ModelCatalogTests(unittest.TestCase):
         del state["referenced_ids"]
         self.write_member_state(state)
         self.assert_fails_with("missing required property 'referenced_ids'")
+
+    def test_member_state_missing_referenced_ids_emits_only_missing_property_error(self):
+        state = self.member_state()
+        del state["referenced_ids"]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assert_fails_with("missing required property 'referenced_ids'", result)
+        self.assertNotIn("must be an array", result.stderr)
 
     def test_member_state_referenced_ids_must_be_sorted(self):
         state = self.member_state()
@@ -467,6 +520,29 @@ class ModelCatalogTests(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_documented_generator_matches_published_sample(self):
+        generator = (
+            'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); '
+            'print(json.dumps(sorted({seat["model_id"] for seat in d["seats"]}), '
+            'ensure_ascii=False, separators=(",", ":")))'
+        )
+        env = dict(os.environ, LC_ALL="C")
+        result = subprocess.run(
+            [
+                "python3",
+                "-c",
+                generator,
+                str(REPO_ROOT / "manifests" / "member-state" / "samples" / "seat-config.example.json"),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, '["vendor-a-model-1","vendor-e-model-1"]\n')
+
     def test_member_state_referenced_ids_reject_duplicates(self):
         state = self.member_state()
         state["referenced_ids"] = ["vendor-a-model-1", "vendor-a-model-1"]
@@ -483,19 +559,27 @@ class ModelCatalogTests(unittest.TestCase):
         state = self.member_state()
         state["referenced_ids"] = "vendor-a-model-1"
         self.write_member_state(state)
-        self.assert_fails_with("referenced_ids for member 'member-a': must be an array")
+        self.assert_fails_with(
+            "member-state member-a.json: referenced_ids for member 'member-a': must be an array"
+        )
 
     def test_member_state_referenced_ids_reject_non_string_element(self):
         state = self.member_state()
         state["referenced_ids"] = [7, "vendor-a-model-1"]
         self.write_member_state(state)
-        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+        self.assert_fails_with(
+            "member-state member-a.json: referenced_ids[0] for member 'member-a': "
+            "must be a non-empty string"
+        )
 
     def test_member_state_referenced_ids_reject_malformed_id(self):
         state = self.member_state()
         state["referenced_ids"] = ["   "]
         self.write_member_state(state)
-        self.assert_fails_with("referenced_ids[0] for member 'member-a': must be a non-empty string")
+        self.assert_fails_with(
+            "member-state member-a.json: referenced_ids[0] for member 'member-a': "
+            "must be a non-empty string"
+        )
 
     def test_member_state_referenced_id_absent_from_catalog_fails_union(self):
         absent_id = "vendor-z-model-404"
@@ -549,6 +633,18 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
             "NOTICE: member 'member-a' references retired model id 'vendor-a-model-1'",
+            result.stderr,
+        )
+
+    def test_member_reference_to_trial_catalog_row_is_notice(self):
+        state = self.member_state()
+        state["referenced_ids"] = ["vendor-g-model-1"]
+        self.write_member_state(state)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "NOTICE: member 'member-a' references trial model id 'vendor-g-model-1' "
+            "(trial rows are outside the draw and outside quorum)",
             result.stderr,
         )
 
