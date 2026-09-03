@@ -4,14 +4,14 @@
   "generator_version": "repo-state-gen v1",
   "repo": "caty-ai/family-memory-architecture",
   "stamp_mode": "auto",
-  "generated_at": "2026-09-03T18:38:41Z",
-  "describes_commit": "970353f57d0fd08f6876f05659c680897849e872",
-  "describes_commit_date": "2026-09-03T18:38:41Z",
+  "generated_at": "2026-09-03T19:01:00Z",
+  "describes_commit": "432ddb217e7bc706c6937d225c5e4f8edc0acccf",
+  "describes_commit_date": "2026-09-03T19:01:00Z",
   "branch": "main",
   "latest_tag": null,
   "latest_release_url": null,
   "agents_entry": null,
   "canonical_api": "https://api.github.com/repos/caty-ai/family-memory-architecture/commits/main",
-  "canonical_raw": "https://raw.githubusercontent.com/caty-ai/family-memory-architecture/970353f57d0fd08f6876f05659c680897849e872/status.json",
+  "canonical_raw": "https://raw.githubusercontent.com/caty-ai/family-memory-architecture/432ddb217e7bc706c6937d225c5e4f8edc0acccf/status.json",
   "freshness_contract": "SHA comparison only; dates may only ever trigger distrust. Protocol: docs/repo-state/spec.md, section 'Reader protocol'."
 }
