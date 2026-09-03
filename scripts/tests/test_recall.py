@@ -115,12 +115,14 @@ class RecallTests(unittest.TestCase):
             self.recall.rg_search("--evil", [Path("/tmp/root")], 3)
             self.recall.grep_search("--evil", [Path("/tmp/root")], 3)
             self.recall.mem_search("--evil", 3)
+            # With HOME cleared, expanduser may use passwd home rather than $HOME.
+            expected_mem_search = str(self.recall.expand_path(self.recall.DEFAULT_MEM_SEARCH))
 
         self.assertEqual(run.call_args_list[0].args[0], ["rg", "--json", "-i", "-m", "3", "-e", "--evil", "--", "/tmp/root"])
         self.assertEqual(run.call_args_list[1].args[0], ["grep", "-Rni", "-m", "3", "-e", "--evil", "--", "/tmp/root"])
         self.assertEqual(
             run.call_args_list[2].args[0],
-            [str(self.recall.expand_path(self.recall.DEFAULT_MEM_SEARCH)), "--json", "-l", "3", "--", "--evil"],
+            [expected_mem_search, "--json", "-l", "3", "--", "--evil"],
         )
 
     def test_parse_layers_rejects_unknown_and_dedups(self):
