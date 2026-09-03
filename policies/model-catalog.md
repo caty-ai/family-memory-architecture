@@ -30,6 +30,7 @@
   ```sh
   LC_ALL=C python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(json.dumps(sorted({seat["model_id"] for seat in d["seats"]}), ensure_ascii=False, separators=(",", ":")))' "$SEAT_CONFIG"
   ```
+- この一行は `seats[].model_id` 形の JSON 席設定向けテンプレートであり、その形のサンプルは `manifests/member-state/samples/seat-config.example.json` にある（説明用のみ — `member-a` の公開 `config_digest` は従来どおりリテラルバイト `member-a-sample-config` から導出する）。異なる設定形のメンバーは抽出部分を調整し、ソート・重複除去規則を維持する。
 - 公開サンプル `member-a` の `config_digest` は `printf 'member-a-sample-config' | sha256sum` で導出する。
 - 決定記録の catalog_digest が `revision_effective_after` を超えて古い場合は「遅延」でなく**非適合**として報告（報告主体は checker・P1 では上記 fail-closed が先に止める）。
 
@@ -37,7 +38,7 @@
 
 - **merge は各 family のオーナー専決**（tier 構成・順序・status はコスト/能力/好みの判断= R-3 オーナー専決領域）。
 - **family PR front door**: 提案は誰でも PR で出せる（merge はオーナーのみ）。
-- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / member-state `referenced_ids` の必須・非空・重複なし・昇順検査と catalog id への union check（retired id の参照は通すが NOTICE）/ public-snapshot 除外節（本 policy の当該見出し）の存在検査。除外**ファイル**自体の存在検査は配布ゲート側の責務（下記 §public-snapshot 除外）。
+- **CI ゲート（fail-closed・`scripts/model-catalog-check`）— 実際に執行する項目**: schema 検証（3点一致の drift guard つき）/ 全行 lineage 宣言 / 重複 id・重複 (tier,rank) なし / trial・retired 行の quorum_eligible=false 強制 / 抽選可能行（current+priority+quorum_eligible）1行以上 / G2 sweep（ヘッダ含む全域）/ policy 逐語文+必須見出しの存在検査 / **改訂 bump 検査**（カタログ内容が変わったのに revision が増えていない PR は FAIL・baseline= `origin/main` の現行カタログ）/ changelog・blast_radius の存在 / member-state の schema+digest 窓検査 / member-state `referenced_ids` の必須・非空・重複なし・昇順検査と catalog id への union check（retired / trial id の参照は通すが NOTICE）/ public-snapshot 除外節（本 policy の当該見出し）の存在検査。除外**ファイル**自体の存在検査は配布ゲート側の責務（下記 §public-snapshot 除外）。
 - **理由つき N/A（ゲート一覧との差分・LC-1 つき）**: ①**メンバー側で never-blessed id の採用を拒否** — 本リポの公開面は各メンバーのローカル席設定と実行時 stamp を読めないため、その採用時拒否そのものは P1 では検査不能（各 family の private selector follow-up Issue・LC-1= 次の selector 改訂）。ただし、公開された state record の `referenced_ids` と catalog id の union check は上記 CI ゲートで強制し、未採用の旧 digest が adoption window 内にある場合だけ NOTICE とする。②**conformance vectors 通過** — vectors は法側で公開後に CI へ組み込む。
 - **緊急降格 fast path**: 事由つき retire はオーナー directive+期限で即時（静かな reorder と区別）。retired 行は削除せず `status: retired` で残す（監査）。
 - 同意の実体は **per-member pinned adoption**（handbook v0.11.0）: merge は誰のホストの既定も変えない。メンバーが adopt するまで動かない。
