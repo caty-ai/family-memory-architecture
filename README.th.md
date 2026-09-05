@@ -22,7 +22,7 @@ AI agent ที่ทำงานอยู่คนละที่ จะไม�
 
 </div>
 <!-- repo-state:begin (generated; do not edit) -->
-<p align="center"><sub>generation: <code>d0be42c</code> (2026-09-05T09:48:29Z) · verify: <a href="https://api.github.com/repos/caty-ai/family-memory-architecture/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<p align="center"><sub>generation: <code>9810db9</code> (2026-09-05T12:34:24Z) · verify: <a href="https://api.github.com/repos/caty-ai/family-memory-architecture/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
 <!-- repo-state:end -->
 
 ---
